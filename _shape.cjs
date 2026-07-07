@@ -1,0 +1,22 @@
+require('dotenv').config();
+const m=require('mongoose');const jwt=require('jsonwebtoken');const http=require('http');
+(async()=>{
+  await m.connect(process.env.DB_URL);const db=m.connection.db;
+  const admin=await db.collection('admins').findOne({});
+  const tok=jwt.sign({adminId:String(admin._id),roleId:admin.roleId,roleName:admin.roleName},process.env.JWTSECRET,{expiresIn:'15m'});
+  const ins=await db.collection('adminsessions').insertOne({adminId:admin._id,token:tok,isActive:true,expiresAt:new Date(Date.now()+900000),createdAt:new Date(),updatedAt:new Date()});
+  const get=(path)=>new Promise(res=>{const req=http.request({host:'127.0.0.1',port:9050,path:'/v1/api'+path,headers:{Authorization:'Bearer '+tok}},r=>{let b='';r.on('data',d=>b+=d);r.on('end',()=>res(b));});req.on('error',e=>res('ERR'+e.message));req.end();});
+  const eo=JSON.parse(await get('/admin/finance/enhanced-overview?period=month'));
+  console.log('=== enhanced-overview .data top-level keys ===');
+  console.log(Object.keys(eo.data));
+  console.log('\n.data.summary =', JSON.stringify(eo.data.summary));
+  console.log('\nFRONTEND reads es.todayEarnings / es.grossRevenue / es.pendingPayouts / es.completedTrips (es = data directly)');
+  console.log('data.todayEarnings (top-level) =', eo.data.todayEarnings, '  <-- undefined => card shows 0');
+  console.log('data.grossRevenue (top-level)  =', eo.data.grossRevenue,  '  <-- undefined => card shows 0');
+  const ov=JSON.parse(await get('/admin/finance/overview?period=month'));
+  console.log('\n=== overview .data.summary keys ===');
+  console.log(Object.keys(ov.data.summary||{}));
+  console.log('summary =', JSON.stringify(ov.data.summary).slice(0,300));
+  await db.collection('adminsessions').deleteOne({_id:ins.insertedId});
+  await m.disconnect();
+})().catch(e=>console.error('ERR',e.message));
