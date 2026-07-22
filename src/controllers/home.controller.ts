@@ -15,8 +15,11 @@ export const getHomePage = async (req: Request, res: Response) => {
     isDeleted: false,
     showOnHomeScreen: { $ne: false },
   })
+    // lengthFt/breadthFt/heightFt were missing here, so the app could never
+    // render the design's "20kg, 2 Feet" subtitle and silently fell back to
+    // the price — the dimensions existed on the record but never left the API.
     .select(
-      "name description maxWeightKg baseFare perKmRate perMinuteRate image icon sortOrder allowIntraCity allowInterCity minRangeKm maxRangeKm showOnHomeScreen"
+      "name description maxWeightKg lengthFt breadthFt heightFt baseFare perKmRate perMinuteRate image icon sortOrder allowIntraCity allowInterCity minRangeKm maxRangeKm showOnHomeScreen"
     )
     .sort({ sortOrder: 1, name: 1 })
     .lean();
@@ -38,7 +41,7 @@ export const getHomePage = async (req: Request, res: Response) => {
 
   // Fetch fare config (GST, platform fee, etc.)
   const fareConfig = await FareConfig.findOne({ isActive: true })
-    .select("gstPercentage platformFeePercentage minimumFare")
+    .select("gstPercentage minimumFare")
     .lean();
 
   res.locals.data = {

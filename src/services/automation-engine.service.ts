@@ -23,6 +23,7 @@ import Booking from "../models/booking.model";
 import Driver from "../models/driver.model";
 import User from "../models/Users";
 import DriverLocation from "../models/driver-location.model";
+import AuditLog from "../models/audit-log.model";
 import { createAuditEntry } from "../controllers/admin/audit-log.controller";
 import * as NotificationService from "./notification.service";
 import * as SupportService from "./support.service";
@@ -288,13 +289,34 @@ export const runAllRules = async (): Promise<{
     const hits = await evaluateTrigger(rule);
     if (hits.length === 0) continue;
 
-    for (const hit of hits) {
+    // Per-target cooldown.
+    //
+    // Triggers describe a STANDING condition ("idle > 7 min", "rating < 3"),
+    // so an unchanged situation matched again on every sweep and fired again:
+    // one idle driver accumulated 116 identical nudges. The audit trail this
+    // engine already writes is the record of what it last did to whom, so it
+    // doubles as the cooldown ledger — one query per rule, no new collection.
+    const cooldownMs = Math.max(0, (rule.cooldownMinutes ?? 720) * 60 * 1000);
+    let dueHits = hits;
+    if (cooldownMs > 0) {
+      const recent = await AuditLog.find({
+        module: "automation",
+        "metadata.ruleId": String(rule._id),
+        createdAt: { $gte: new Date(Date.now() - cooldownMs) },
+      }).select("targetId");
+      const onCooldown = new Set(recent.map((r: any) => String(r.targetId)));
+      dueHits = hits.filter((h) => !onCooldown.has(String(h.targetId)));
+    }
+
+    if (dueHits.length === 0) continue;
+
+    for (const hit of dueHits) {
       await executeAction(rule, hit);
       fired += 1;
     }
     await AutomationRule.findByIdAndUpdate(rule._id, {
       lastTriggeredAt: new Date(),
-      $inc: { triggerCount: hits.length },
+      $inc: { triggerCount: dueHits.length },
     });
   }
 

@@ -5,6 +5,16 @@ const VehicleTypeSchema = new Schema<IVehicleType>(
   {
     name: { type: String, required: true, unique: true },
     description: { type: String },
+    // The category this type belongs to. Without it, mapping a vehicle's coarse
+    // "2W"/"3W"/"4W" onto a bookable type meant guessing from the name.
+    categoryCode: {
+      type: String,
+      enum: ["2W", "3W", "4W", "HV"],
+      index: true,
+    },
+    // The canonical type for that category, used when only the category is
+    // known. Enforced as one-per-category by the partial unique index below.
+    isDefaultForCategory: { type: Boolean, default: false },
     maxWeightKg: { type: Number, required: true },
     // Cargo area dimensions (feet)
     lengthFt: { type: Number, default: 0, min: 0 },
@@ -34,5 +44,19 @@ const VehicleTypeSchema = new Schema<IVehicleType>(
 
 VehicleTypeSchema.index({ isDeleted: 1, isActive: 1 });
 VehicleTypeSchema.index({ sortOrder: 1 });
+
+// Exactly one default per category — enforced here rather than by convention,
+// because two defaults would put the ambiguity straight back: resolving a "2W"
+// vehicle would once again be a coin-flip between "2 Wheeler" and "Scooter".
+// Named explicitly: without a distinct name this collides with the plain
+// `categoryCode` index above (same key, different options -> IndexKeySpecsConflict).
+VehicleTypeSchema.index(
+  { categoryCode: 1 },
+  {
+    name: "one_default_per_category",
+    unique: true,
+    partialFilterExpression: { isDefaultForCategory: true },
+  },
+);
 
 export default mongoose.model<IVehicleType>("VehicleType", VehicleTypeSchema);

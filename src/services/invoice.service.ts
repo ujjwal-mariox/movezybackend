@@ -2,6 +2,42 @@ import Invoice, { IInvoice } from "../models/invoice.model";
 import Booking from "../models/booking.model";
 import { AppConfig } from "../models/app-config.model";
 import { Types } from "mongoose";
+import { renderInvoicePdf } from "./invoice-pdf.service";
+import { uploadBufferToAws } from "../utils/s3";
+
+/**
+ * Render + upload the invoice PDF and persist its URL, if not already done.
+ *
+ * Deliberately non-fatal: a PDF/S3 failure must not stop the caller from
+ * getting the invoice data back. The apps already fall back to showing the
+ * invoice number when pdfUrl is absent, so the worst case is the old behaviour.
+ * Runs lazily on fetch, so invoices created before PDFs existed get one too.
+ */
+const ensureInvoicePdf = async (
+  invoice: IInvoice,
+  booking: any,
+): Promise<IInvoice> => {
+  if (invoice.pdfUrl) return invoice;
+
+  try {
+    const buffer = await renderInvoicePdf({ invoice, booking });
+    const key = `invoices/${invoice.invoiceNumber}.pdf`;
+    const pdfUrl = await uploadBufferToAws(buffer, key, "application/pdf");
+
+    const updated = await Invoice.findByIdAndUpdate(
+      invoice._id,
+      { pdfUrl },
+      { new: true },
+    );
+    return updated || invoice;
+  } catch (err: any) {
+    console.error(
+      `[invoice] PDF generation failed for ${invoice.invoiceNumber}:`,
+      err?.message || err,
+    );
+    return invoice;
+  }
+};
 
 /**
  * Generate invoice number
@@ -43,7 +79,7 @@ export const generateInvoice = async (
   // Check if invoice already exists
   const existingInvoice = await Invoice.findOne({ bookingId });
   if (existingInvoice) {
-    return existingInvoice;
+    return await ensureInvoicePdf(existingInvoice, booking);
   }
 
   // Get company GSTIN from config
@@ -93,7 +129,7 @@ export const generateInvoice = async (
   // Update booking with invoice reference
   await Booking.findByIdAndUpdate(bookingId, { invoiceId: invoice._id });
 
-  return invoice;
+  return await ensureInvoicePdf(invoice, booking);
 };
 
 /**

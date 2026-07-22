@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { Types } from "mongoose";
+import mongoose, { Types } from "mongoose";
 import crypto from "crypto";
 import DriverModel from "../models/driver.model";
 import DriverVehicleModel from "../models/driver-vehicle.model";
@@ -10,7 +10,9 @@ import RewardTransaction from "../models/reward-transaction.model";
 import * as DriverLocationService from "../services/driver-location.service";
 import * as BookingDispatchService from "../services/booking-dispatch.service";
 import * as fileUploadService from "../utils/s3";
-import { getIO } from "../utils/socket.util";
+import { emitToUser } from "../utils/socket.util";
+import * as NotificationService from "../services/notification.service";
+import * as FareService from "../services/fare.service";
 import User from "../models/Users";
 import * as RewardService from "../services/reward.service";
 import * as WalletService from "../services/wallet.service";
@@ -19,6 +21,7 @@ import * as SupportService from "../services/support.service";
 import DriverInstruction from "../models/driver-instruction.model";
 import Badge from "../models/badge.model";
 import TrainingMaterial from "../models/training-material.model";
+import { getTrainingGateStatus } from "../services/training-gate.service";
 import VehicleTypeModel from "../models/vehicle-type.model";
 import DriverKycModel from "../models/driver-kyc.model";
 import VehicleModel from "../models/vehicle.model";
@@ -26,7 +29,7 @@ import * as PaymentService from "../services/payment.service";
 import { Notification } from "../models/notification.model";
 import * as IncentiveService from "../services/incentive.service";
 import * as SOSService from "../services/sos.service";
-import { AppConfig } from "../models/app-config.model";
+import { AppConfig, FareConfig } from "../models/app-config.model";
 import { cache } from "../utils/redis.util";
 import Payout from "../models/payout.model";
 import * as DriverPayoutService from "../services/driver-payout.service";
@@ -114,6 +117,7 @@ export const getDashboard = async (
       lifetimeStats,
       todayStats,
       onGoingCount,
+      upcomingCount,
       completedCount,
       pendingCount,
       currentBooking,
@@ -139,7 +143,11 @@ export const getDashboard = async (
         {
           $group: {
             _id: null,
-            totalEarnings: { $sum: { $ifNull: ["$finalFare", "$fare"] } },
+            // Every earnings figure a driver sees must agree with what they can
+            // actually withdraw. These summed finalFare — the customer's gross,
+            // GST and commission included — so the dashboard headline promised
+            // ~24% more than the payout screen would ever pay out.
+            totalEarnings: { $sum: { $ifNull: ["$driverEarnings", 0] } },
             totalServices: { $sum: 1 },
           },
         },
@@ -155,13 +163,22 @@ export const getDashboard = async (
         {
           $group: {
             _id: null,
-            todaysEarnings: { $sum: { $ifNull: ["$finalFare", "$fare"] } },
+            todaysEarnings: { $sum: { $ifNull: ["$driverEarnings", 0] } },
             todaysServices: { $sum: 1 },
           },
         },
       ]),
       BookingModel.countDocuments({
         driverId: driverObjectId,
+        status: { $in: ACTIVE_BOOKING_STATUSES },
+      }),
+      // Scheduled work still ahead of this driver. `upcomingServices` used to
+      // be the on-going count under a second name, so the dashboard showed one
+      // number twice under two different labels.
+      BookingModel.countDocuments({
+        driverId: driverObjectId,
+        isScheduled: true,
+        scheduledAt: { $gt: new Date() },
         status: { $in: ACTIVE_BOOKING_STATUSES },
       }),
       BookingModel.countDocuments({
@@ -174,12 +191,12 @@ export const getDashboard = async (
         status: { $in: ACTIVE_BOOKING_STATUSES },
       })
         .populate("userId", "fullName")
-        .populate("vehicleTypeId", "name icon")
+        .populate("vehicleTypeId", "name icon image")
         .sort({ createdAt: -1 })
         .lean(),
       BookingModel.find(pendingFilter)
         .populate("userId", "fullName")
-        .populate("vehicleTypeId", "name icon")
+        .populate("vehicleTypeId", "name icon image")
         .sort({ createdAt: -1 })
         .limit(5)
         .lean(),
@@ -188,7 +205,7 @@ export const getDashboard = async (
         status: "COMPLETED",
       })
         .populate("userId", "fullName")
-        .populate("vehicleTypeId", "name icon")
+        .populate("vehicleTypeId", "name icon image")
         .sort({ completedAt: -1, createdAt: -1 })
         .limit(5)
         .lean(),
@@ -206,7 +223,7 @@ export const getDashboard = async (
               year: { $year: "$completedAt" },
               month: { $month: "$completedAt" },
             },
-            amount: { $sum: { $ifNull: ["$finalFare", "$fare"] } },
+            amount: { $sum: { $ifNull: ["$driverEarnings", 0] } },
           },
         },
         { $sort: { "_id.year": 1, "_id.month": 1 } },
@@ -218,6 +235,8 @@ export const getDashboard = async (
       req.msg = "driver_not_found";
       return next();
     }
+
+    const trainingGate = await getTrainingGateStatus(driverId);
 
     // If no profilePhoto, fallback to KYC selfie
     if (!driver.profilePhoto) {
@@ -255,6 +274,15 @@ export const getDashboard = async (
       };
     });
 
+    // The rate the settlement will actually charge, read once for every
+    // booking mapped below.
+    const dashFareConfig = await FareConfig.findOne({ isActive: true })
+      .select("driverCommissionPercent")
+      .lean();
+    const commissionPercent = Number(
+      (dashFareConfig as any)?.driverCommissionPercent ?? 20,
+    );
+
     req.rData = {
       driver: {
         id: String((driver as any)._id),
@@ -275,10 +303,13 @@ export const getDashboard = async (
         balance: Number(wallet?.balance || 0),
         lockedBalance: Number(wallet?.lockedBalance || 0),
       },
+      // Surfaced so the driver app can explain where the estimate comes from
+      // instead of presenting a net figure with no visible derivation.
+      commissionPercent,
       stats: {
         totalEarnings: Number(lifetime.totalEarnings || 0),
         totalServices: Number(lifetime.totalServices || 0),
-        upcomingServices: Number(onGoingCount || 0),
+        upcomingServices: Number(upcomingCount || 0),
         todaysServices: Number(today.todaysServices || 0),
         todaysEarnings: Number(today.todaysEarnings || 0),
         onGoingCount: Number(onGoingCount || 0),
@@ -287,11 +318,24 @@ export const getDashboard = async (
         monthlyRevenue: revenueTrend,
       },
       bookings: {
-        current: currentBooking ? mapDashboardBooking(currentBooking) : null,
-        pending: pendingBookings.map((booking) => mapDashboardBooking(booking)),
-        completed: completedBookings.map((booking) =>
-          mapDashboardBooking(booking),
+        current: currentBooking
+          ? mapDashboardBooking(currentBooking, commissionPercent)
+          : null,
+        pending: pendingBookings.map((booking) =>
+          mapDashboardBooking(booking, commissionPercent),
         ),
+        completed: completedBookings.map((booking) =>
+          mapDashboardBooking(booking, commissionPercent),
+        ),
+      },
+      // Lets the home screen show the "complete training to start earning" card
+      // and pre-empt the go-online block, rather than only discovering the gate
+      // when the toggle is rejected.
+      training: {
+        required: trainingGate.required,
+        complete: trainingGate.complete,
+        totalRequired: trainingGate.totalRequired,
+        completedRequired: trainingGate.completedRequired,
       },
     };
     req.msg = "dashboard_fetched";
@@ -326,7 +370,7 @@ export const getProfile = async (
         $group: {
           _id: null,
           totalTrips: { $sum: 1 },
-          totalEarnings: { $sum: { $ifNull: ["$finalFare", "$fare"] } },
+          totalEarnings: { $sum: { $ifNull: ["$driverEarnings", 0] } },
           totalDistance: { $sum: "$distanceKm" },
           totalDurationMin: { $sum: "$durationMin" },
         },
@@ -989,7 +1033,7 @@ export const getRecommendedBookings = async (
 
     const bookings = await BookingModel.find(filter)
       .populate("userId", "fullName")
-      .populate("vehicleTypeId", "name icon")
+      .populate("vehicleTypeId", "name icon image")
       .sort({ createdAt: -1 })
       .limit(10)
       .lean();
@@ -1015,6 +1059,8 @@ export const getBookingHistory = async (
     if (status) query.status = status;
 
     const bookings = await BookingModel.find(query)
+      // Never ship OTPs to the driver — history includes the ACTIVE booking.
+      .select("-otp -deliveryOtp")
       .populate("userId", "fullName")
       .populate("vehicleTypeId", "name")
       .sort({ createdAt: -1 })
@@ -1045,7 +1091,7 @@ export const getCurrentBooking = async (
       status: { $in: ACTIVE_BOOKING_STATUSES },
     })
       .populate("userId", "fullName")
-      .populate("vehicleTypeId", "name icon")
+      .populate("vehicleTypeId", "name icon image")
       .lean();
 
     req.rData = booking ? mapDashboardBooking(booking) : null;
@@ -1096,10 +1142,49 @@ export const acceptBooking = async (
     // Get updated booking
     const booking = await BookingModel.findById(bookingId)
       .populate("userId", "fullName")
-      .populate("vehicleTypeId", "name icon")
+      .populate("vehicleTypeId", "name icon image")
       .lean();
 
-    req.rData = booking ? mapDashboardBooking(booking) : null;
+    // Use the configured commission, not the mapper's default 20 — otherwise
+    // the earnings shown right after accepting can differ from the dashboard's.
+    const acceptFareConfig = await FareConfig.findOne({ isActive: true })
+      .select("driverCommissionPercent")
+      .lean();
+    const acceptCommission = Number(
+      (acceptFareConfig as any)?.driverCommissionPercent ?? 20,
+    );
+
+    // Put the job in the driver's inbox.
+    //
+    // Dispatch only ever sent a raw FCM push (sendPushNotification writes no
+    // Notification document), so a driver could run a dozen trips and find an
+    // empty notifications page. The offer itself stays transient — it goes to
+    // every nearby driver and dies in 30s, so persisting that would fill the
+    // inbox with expired offers — but the job you actually WON belongs there.
+    if (booking) {
+      const pickupAddr = String((booking as any)?.pickup?.address || "").slice(
+        0,
+        60,
+      );
+      await NotificationService.sendToDriver(
+        new Types.ObjectId(String(driverId)),
+        "BOOKING",
+        "Booking assigned",
+        pickupAddr
+          ? `Pickup: ${pickupAddr}`
+          : `Booking ${(booking as any).bookingNumber || ""} is yours.`,
+        { bookingId: String(bookingId) },
+        booking._id as Types.ObjectId,
+        "Booking",
+      ).catch((e) =>
+        // Never fail an accepted booking over its notification.
+        console.error("accept notification failed", e),
+      );
+    }
+
+    req.rData = booking
+      ? mapDashboardBooking(booking, acceptCommission)
+      : null;
     req.msg = "booking_accepted";
     next();
   } catch (error) {
@@ -1151,10 +1236,17 @@ export const arrivedAtPickup = async (
       return next();
     }
 
-    const io = getIO();
-    io.to(`user_${booking.userId}`).emit("driver_arrived", booking);
+    // Sockets join `user:<id>` (socket.util), so the old `user_<id>` room was
+    // empty and this event reached nobody.
+    emitToUser(String(booking.userId), "driver_arrived", booking);
 
-    req.rData = booking;
+    await NotificationService.sendBookingStatusNotification(
+      booking.userId as Types.ObjectId,
+      booking._id as Types.ObjectId,
+      "DRIVER_ARRIVED",
+    ).catch(() => null);
+
+    req.rData = scrubOtps((booking as any).toObject?.() ?? booking);
     req.msg = "arrived_at_pickup";
     next();
   } catch (error) {
@@ -1192,9 +1284,55 @@ export const verifyPickupOtp = async (
 
     booking.status = "PICKED";
     booking.pickedAt = new Date();
+
+    // ─── WAITING CHARGE ───
+    // How long the driver waited at pickup: driverArrivedAt → pickedAt. This is
+    // the only point where both timestamps exist, and it is before payment is
+    // captured (the Razorpay order is created from the current finalFare, and
+    // cash is collected at completion), so the customer is quoted the right
+    // amount. Previously waitingMinutes stayed 0 and drivers were never paid.
+    if (booking.driverArrivedAt) {
+      const waitedMs = booking.pickedAt.getTime() - booking.driverArrivedAt.getTime();
+      const waitingMinutes = Math.max(0, Math.floor(waitedMs / 60000));
+      const waitingCharge = await FareService.calculateWaitingCharges(waitingMinutes);
+
+      booking.waitingMinutes = waitingMinutes;
+      booking.waitingCharge = waitingCharge;
+
+      // Never retro-bill a booking that is already settled — that would need a
+      // separate top-up/refund flow rather than a silent fare change.
+      if (waitingCharge > 0 && booking.paymentStatus !== "PAID") {
+        const round2 = (n: number) => Math.round(n * 100) / 100;
+        const gstPercentage = booking.gstPercentage || 5;
+
+        booking.subtotal = round2((booking.subtotal || 0) + waitingCharge);
+        booking.gstAmount = round2((booking.subtotal * gstPercentage) / 100);
+        booking.finalFare = round2(
+          Math.max(
+            0,
+            booking.subtotal + booking.gstAmount - (booking.totalDiscount || 0),
+          ),
+        );
+        // `fare` mirrors finalFare at creation; keep them in step.
+        booking.fare = booking.finalFare;
+      }
+    }
+
     await booking.save();
 
-    req.rData = booking;
+    emitToUser(String(booking.userId), "booking:picked", booking);
+
+    await NotificationService.sendBookingStatusNotification(
+      booking.userId as Types.ObjectId,
+      booking._id as Types.ObjectId,
+      "PICKED",
+    ).catch(() => null);
+
+    // Consignee notice: SMS the parcel's receiver that it is on its way. They
+    // are not an app user, so SMS is the only channel that reaches them.
+    await NotificationService.notifyConsigneePickup(booking).catch(() => null);
+
+    req.rData = scrubOtps((booking as any).toObject?.() ?? booking);
     req.msg = "otp_verified";
     next();
   } catch (error) {
@@ -1227,11 +1365,88 @@ export const startTrip = async (
       return next();
     }
 
-    const io = getIO();
-    io.to(`user_${booking.userId}`).emit("trip_started", booking);
+    emitToUser(String(booking.userId), "trip_started", booking);
 
-    req.rData = booking;
+    await NotificationService.sendBookingStatusNotification(
+      booking.userId as Types.ObjectId,
+      booking._id as Types.ObjectId,
+      "IN_PROGRESS",
+    ).catch(() => null);
+
+    req.rData = scrubOtps((booking as any).toObject?.() ?? booking);
     req.msg = "trip_started";
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Mark one intermediate stop delivered.
+ *
+ * Multi-drop rides had no per-stop state: the driver had a single COMPLETE
+ * for the whole trip and nothing tracked which drops were done. Stops must be
+ * completed in order — the route was priced through them in sequence.
+ */
+export const completeStop = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  try {
+    const driverId = (req as any).driverId;
+    const { bookingId, stopIndex } = req.params;
+
+    const booking = await BookingModel.findOne({
+      _id: bookingId,
+      driverId: new Types.ObjectId(driverId),
+      // PICKED covers drivers who head to the first stop before tapping
+      // "start trip"; both states mean the goods are on board.
+      status: { $in: ["PICKED", "IN_PROGRESS"] },
+    });
+
+    if (!booking) {
+      req.rCode = 0;
+      req.msg = "invalid_booking";
+      return next();
+    }
+
+    const idx = Number(stopIndex);
+    const stops: any[] = (booking.stops as any[]) || [];
+    if (!Number.isInteger(idx) || idx < 0 || idx >= stops.length) {
+      req.rCode = 0;
+      req.msg = "invalid_stop";
+      return next();
+    }
+    if (stops[idx].completedAt) {
+      req.rCode = 0;
+      req.msg = "stop_already_completed";
+      return next();
+    }
+    // In order: every earlier stop must already be done.
+    if (stops.slice(0, idx).some((s) => !s.completedAt)) {
+      req.rCode = 0;
+      req.msg = "complete_previous_stops_first";
+      return next();
+    }
+
+    stops[idx].completedAt = new Date();
+    booking.markModified("stops");
+    await booking.save();
+
+    // Let the customer's tracking screen tick the drop off live.
+    emitToUser(String(booking.userId), "booking:stop_completed", {
+      bookingId: String(booking._id),
+      stopIndex: idx,
+      completedAt: stops[idx].completedAt,
+    });
+
+    req.rData = {
+      stopIndex: idx,
+      completedAt: stops[idx].completedAt,
+      remainingStops: stops.filter((s) => !s.completedAt).length,
+    };
+    req.msg = "stop_completed";
     next();
   } catch (error) {
     next(error);
@@ -1259,9 +1474,66 @@ export const completeTrip = async (
       return next();
     }
 
+    // Every intermediate drop must be marked delivered before the final one —
+    // otherwise COMPLETE quietly closes a ride whose middle drops nobody
+    // confirmed. Only bites when stops exist, so plain A→B rides are untouched.
+    const openStops = ((booking.stops as any[]) || []).filter(
+      (s) => !s.completedAt,
+    ).length;
+    if (openStops > 0) {
+      req.rCode = 0;
+      req.msg = "complete_stops_first";
+      req.rData = { remainingStops: openStops };
+      return next();
+    }
+
+    // Delivery OTP gate: the receiver reads their code out at the drop. Only
+    // enforced when the booking has one — bookings created before the field
+    // existed complete exactly as before.
+    if (booking.deliveryOtp) {
+      const suppliedOtp = String(req.body?.otp ?? "");
+      if (suppliedOtp !== booking.deliveryOtp) {
+        req.rCode = 0;
+        req.msg = "invalid_delivery_otp";
+        return next();
+      }
+    }
+
     booking.status = "COMPLETED";
     booking.completedAt = new Date();
+
+    // Freeze the driver's settlement for this trip.
+    //
+    // Payouts used to derive earnings as Σ finalFare. finalFare includes the
+    // customer's GST, so drivers could withdraw tax the platform owes the
+    // government, and no commission was ever taken. Earnings are computed from
+    // the pre-GST subtotal and stored per booking, so a later rate change can
+    // never silently rewrite what a driver already earned.
+    //
+    // Commission is charged on the full subtotal, not on the discounted total:
+    // promo and coin discounts are Movezy's marketing cost, and the driver did
+    // the same trip either way.
+    const settlementConfig = await FareConfig.findOne({ isActive: true });
+    const commissionPercent = settlementConfig?.driverCommissionPercent ?? 20;
+    const settlementBase = booking.subtotal ?? 0;
+    const commissionAmount =
+      Math.round(((settlementBase * commissionPercent) / 100) * 100) / 100;
+    booking.commissionPercent = commissionPercent;
+    booking.commissionAmount = commissionAmount;
+    booking.driverEarnings =
+      Math.round((settlementBase - commissionAmount) * 100) / 100;
+
     await booking.save();
+
+    // This trip may have completed a daily/weekly/peak target. Awarding writes
+    // a ledger row the payout balance includes — the app has always shown
+    // "Incentives Unlocked" and "Total (Earnings + Bonus)", but nothing ever
+    // credited the bonus. Never fail a completed trip over a bonus.
+    try {
+      await IncentiveService.awardEarnedIncentives(String(driverId));
+    } catch (e) {
+      console.error("awardEarnedIncentives failed", e);
+    }
 
     // Update driver
     await DriverModel.findByIdAndUpdate(driverId, {
@@ -1311,16 +1583,40 @@ export const completeTrip = async (
           "Booking",
           `Earned ${coinsEarned} coins for completed booking`
         );
+        // Record it on the booking too. The coins were credited but this was
+        // never set, so the trip/completion screens — which only show the
+        // "+N coins earned" banner when coinsEarned > 0 — never displayed it.
+        booking.coinsEarned = coinsEarned;
+        await booking.save();
       }
     } catch (coinError) {
       // Don't fail the trip completion if coin crediting fails
       console.error("Coin crediting error:", coinError);
     }
 
-    const io = getIO();
-    io.to(`user_${booking.userId}`).emit("trip_completed", booking);
+    emitToUser(String(booking.userId), "trip_completed", booking);
 
-    req.rData = booking;
+    await NotificationService.sendBookingStatusNotification(
+      booking.userId as Types.ObjectId,
+      booking._id as Types.ObjectId,
+      "COMPLETED",
+    ).catch(() => null);
+
+    // The customer is told the trip finished; the driver never was — and
+    // nothing in the app ever told them what they earned, despite the
+    // settlement being frozen right above. PAYMENT type, so it reads as money
+    // rather than another job alert.
+    await NotificationService.sendToDriver(
+      new Types.ObjectId(String(driverId)),
+      "PAYMENT",
+      "Trip completed",
+      `₹${(booking.driverEarnings ?? 0).toFixed(2)} added to your earnings for booking ${booking.bookingNumber || ""}.`.trim(),
+      { bookingId: String(booking._id) },
+      booking._id as Types.ObjectId,
+      "Booking",
+    ).catch((e) => console.error("completion notification failed", e));
+
+    req.rData = scrubOtps((booking as any).toObject?.() ?? booking);
     req.msg = "trip_completed";
     next();
   } catch (error) {
@@ -1337,15 +1633,11 @@ export const collectCashPayment = async (
     const driverId = (req as any).driverId;
     const { bookingId } = req.params;
 
-    const booking = await BookingModel.findOneAndUpdate(
-      {
-        _id: bookingId,
-        driverId: new Types.ObjectId(driverId),
-        status: "COMPLETED",
-      },
-      { paymentStatus: "PAID" },
-      { new: true },
-    );
+    const booking = await BookingModel.findOne({
+      _id: bookingId,
+      driverId: new Types.ObjectId(driverId),
+      status: "COMPLETED",
+    });
 
     if (!booking) {
       req.rCode = 0;
@@ -1353,8 +1645,102 @@ export const collectCashPayment = async (
       return next();
     }
 
-    req.rData = booking;
+    // Guard against marking a prepaid trip PAID-by-cash. Cash collection is only
+    // valid for a COD booking that hasn't already been settled online/by wallet;
+    // otherwise this would overwrite a real Razorpay payment and imply the driver
+    // took cash for a trip the customer already paid for.
+    if (booking.paymentMethod !== "CASH") {
+      req.rCode = 0;
+      req.msg = "not_a_cash_booking";
+      return next();
+    }
+    if (booking.paymentStatus === "PAID") {
+      // Already settled — treat as a no-op success so a retry doesn't error.
+      req.rData = scrubOtps((booking as any).toObject?.() ?? booking);
+      req.msg = "cash_collected";
+      return next();
+    }
+
+    booking.paymentStatus = "PAID";
+    await booking.save();
+
+    req.rData = scrubOtps((booking as any).toObject?.() ?? booking);
     req.msg = "cash_collected";
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Driver cancels an assigned booking (e.g. customer unreachable, wrong address).
+ *
+ * The state model always allowed this (cancelledBy has a DRIVER value) but there
+ * was no endpoint and no button, so a driver stuck with an unreachable customer
+ * could only fake-complete the trip — and the active booking blocked all new work.
+ *
+ * Only before pickup: once goods are aboard (PICKED/IN_PROGRESS) cancelling is a
+ * support case, not a self-serve action. The booking returns to the pool rather
+ * than being killed, so the customer keeps their ride.
+ */
+export const cancelBookingByDriver = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  try {
+    const driverId = (req as any).driverId;
+    const { bookingId } = req.params;
+    const { reason } = req.body as { reason?: string };
+
+    const booking = await BookingModel.findOne({
+      _id: bookingId,
+      driverId: new Types.ObjectId(driverId),
+      status: { $in: ["ASSIGNED", "DRIVER_ARRIVED"] },
+    });
+
+    if (!booking) {
+      req.rCode = 0;
+      req.msg = "invalid_booking";
+      return next();
+    }
+
+    // Release the driver and put the booking back out to search.
+    booking.status = "SEARCHING";
+    booking.driverId = undefined;
+    booking.assignedAt = undefined;
+    booking.driverArrivedAt = undefined;
+    await booking.save();
+
+    await DriverModel.findByIdAndUpdate(driverId, { currentBookingId: null });
+
+    // Tell the customer their driver dropped off and we're re-searching.
+    emitToUser(String(booking.userId), "booking:status", {
+      bookingId: String(booking._id),
+      status: "SEARCHING",
+      message: "Your driver cancelled. We're finding you another driver.",
+    });
+    await NotificationService.sendToUser(
+      booking.userId as Types.ObjectId,
+      "BOOKING",
+      "Finding a new driver",
+      "Your driver had to cancel. We're assigning someone else.",
+      { bookingId: String(booking._id) },
+    ).catch(() => null);
+
+    // Re-dispatch to other nearby drivers. Non-fatal: the booking is already
+    // SEARCHING, so it stays discoverable even if this throws.
+    BookingDispatchService.dispatchBookingToDrivers(String(booking._id)).catch(
+      (err: any) =>
+        console.error("Driver cancel: re-dispatch failed", err?.message || err),
+    );
+
+    console.log(
+      `Booking ${booking.bookingNumber} cancelled by driver ${driverId}: ${reason || "no reason"}`,
+    );
+
+    req.rData = scrubOtps((booking as any).toObject?.() ?? booking);
+    req.msg = "booking_cancelled";
     next();
   } catch (error) {
     next(error);
@@ -1374,6 +1760,11 @@ export const getBookingDetails = async (
       _id: bookingId,
       driverId: new Types.ObjectId(driverId),
     })
+      // Never expose the pickup OTP to the driver — the customer reads it out at
+      // pickup. Without this projection the raw booking leaked it here, undoing
+      // its deliberate removal from the dashboard payload (mapDashboardBooking)
+      // and letting a driver self-verify pickup without meeting the customer.
+      .select("-otp")
       .populate("userId", "fullName mobileNumber")
       .populate("vehicleTypeId", "name")
       .lean();
@@ -1384,7 +1775,12 @@ export const getBookingDetails = async (
       return next();
     }
 
-    req.rData = booking;
+    // Tell the driver whether a delivery OTP gate exists — but never the code
+    // itself, for the same reason the pickup OTP is stripped above.
+    (booking as any).deliveryOtpRequired = Boolean((booking as any).deliveryOtp);
+    delete (booking as any).deliveryOtp;
+
+    req.rData = scrubOtps((booking as any).toObject?.() ?? booking);
     req.msg = "booking_fetched";
     next();
   } catch (error) {
@@ -1431,6 +1827,25 @@ export const toggleOnlineStatus = async (
           isOnline: false,
           status: driver.status,
           reason: driver.rejectionReason || "",
+        };
+        return next();
+      }
+
+      // Training gate: block going online until mandatory training is done.
+      // Inert unless an admin has marked a program mandatory, so it never
+      // surprises an existing fleet. Only gates going ONLINE — a driver can
+      // always go offline.
+      const gate = await getTrainingGateStatus(driverId);
+      if (gate.required && !gate.complete) {
+        req.rCode = 4;
+        req.msg = "training_incomplete";
+        req.rData = {
+          isOnline: false,
+          status: driver.status,
+          trainingRequired: true,
+          trainingComplete: false,
+          completedRequired: gate.completedRequired,
+          totalRequired: gate.totalRequired,
         };
         return next();
       }
@@ -1518,6 +1933,7 @@ export const addMyVehicle = async (
     const {
       vehicleNumber,
       vehicleType,
+      vehicleTypeId,
       vehicleBodyType,
       fuelType,
       city,
@@ -1529,6 +1945,24 @@ export const addMyVehicle = async (
       req.rCode = 0;
       req.msg = "vehicle_number_required";
       return next();
+    }
+
+    // Which catalog vehicle is this? Dispatch matches bookings on a specific
+    // VehicleType, so a vehicle added without one could never be sent a job —
+    // this route only ever stored the broad "2W"/"3W" category, which is why
+    // vehicles added in-app never received bookings.
+    let catalogTypeId: Types.ObjectId | undefined;
+    if (vehicleTypeId && Types.ObjectId.isValid(String(vehicleTypeId))) {
+      const catalogType = await VehicleTypeModel.findOne({
+        _id: new Types.ObjectId(String(vehicleTypeId)),
+        isActive: true,
+      }).select("_id");
+      if (!catalogType) {
+        req.rCode = 0;
+        req.msg = "invalid_vehicle_type";
+        return next();
+      }
+      catalogTypeId = catalogType._id as Types.ObjectId;
     }
 
     // Check duplicate
@@ -1570,6 +2004,7 @@ export const addMyVehicle = async (
       driverId: new Types.ObjectId(driverId),
       vehicleNumber,
       vehicleType: vehicleType || "4W",
+      vehicleTypeId: catalogTypeId,
       vehicleBodyType,
       fuelType,
       city,
@@ -1760,8 +2195,44 @@ export const deleteVehicle = async (
   }
 };
 
-function mapDashboardBooking(booking: any) {
+/**
+ * Strip both OTPs from any booking object about to be sent to a DRIVER.
+ *
+ * The pickup OTP is the customer's proof-of-presence and the delivery OTP the
+ * receiver's — a driver holding either can self-verify without meeting anyone.
+ * getBookingDetails and mapDashboardBooking already strip them, but the
+ * lifecycle handlers (arrive/verify/start/complete/cancel/history) returned
+ * raw booking docs and leaked both codes right back.
+ */
+function scrubOtps<T>(booking: T): T {
+  if (booking && typeof booking === "object") {
+    // Idempotent: an already-scrubbed object (getBookingDetails strips the
+    // code itself) must keep its true flag, not have it recomputed to false
+    // from the deleted field.
+    (booking as any).deliveryOtpRequired =
+      Boolean((booking as any).deliveryOtp) ||
+      (booking as any).deliveryOtpRequired === true;
+    delete (booking as any).otp;
+    delete (booking as any).deliveryOtp;
+  }
+  return booking;
+}
+
+function mapDashboardBooking(booking: any, commissionPercent = 20) {
+  // What this trip is actually worth to the driver, using the same formula the
+  // settlement freezes at completion (subtotal - commission, pre-GST). Sent as
+  // a distinct field so no client is tempted to label finalFare "earnings".
+  const settlementBase = Number(booking?.subtotal ?? 0);
+  const estimatedEarnings =
+    settlementBase > 0
+      ? Math.round((settlementBase * (100 - commissionPercent)) / 100 * 100) /
+        100
+      : 0;
+
   return {
+    // Frozen once completed; before that, the estimate above.
+    estimatedEarnings: Number(booking?.driverEarnings ?? estimatedEarnings),
+    commissionPercent,
     id: String(booking?._id || ""),
     bookingNumber: booking?.bookingNumber || "",
     serviceType: booking?.serviceType || "",
@@ -1784,6 +2255,20 @@ function mapDashboardBooking(booking: any) {
       floor: booking?.drop?.floor ?? null,
       isLiftAvailable: booking?.drop?.isLiftAvailable ?? null,
     },
+    // Intermediate drops, in delivery order. These were stripped here even
+    // though the fare bills per stop — so the offer screen showed a multi-drop
+    // ride as a plain A→B trip and the driver found out en route.
+    stops: (Array.isArray(booking?.stops) ? booking.stops : []).map(
+      (s: any) => ({
+        address: s?.address || "",
+        lat: Number(s?.lat || 0),
+        lng: Number(s?.lng || 0),
+        contactName: s?.contactName || "",
+        contactPhone: s?.contactPhone || "",
+        floor: s?.floor ?? null,
+        completedAt: s?.completedAt ?? null,
+      }),
+    ),
     // Keep legacy flat fields for backward compat
     pickupAddress: booking?.pickup?.address || "",
     dropAddress: booking?.drop?.address || "",
@@ -1803,7 +2288,9 @@ function mapDashboardBooking(booking: any) {
     paymentMethod: booking?.paymentMethod || "CASH",
     goodsType: booking?.goodsType || "",
     goodsDescription: booking?.goodsDescription || "",
-    otp: booking?.otp || "",
+    // The pickup OTP is deliberately NOT sent to the driver: the customer reads
+    // it out at pickup and the driver submits it to verifyPickupOtp. Including
+    // it here would let a driver verify pickup without ever meeting the customer.
     addons: (booking?.addons || []).map((a: any) => ({
       name: a?.name || "",
       price: Number(a?.price || 0),
@@ -1906,10 +2393,16 @@ export const completeTrainingLesson = async (
 ) => {
   try {
     const driverId = (req as any).driverId;
-    const { moduleId, lessonId } = req.params;
+    const { lessonId } = req.params;
 
+    // Store the plain material id. This used to store `${moduleId}_${lessonId}`,
+    // but materials are flat (no module/lesson hierarchy) and the app sends the
+    // same materialId for both params, so every stored key was the degenerate
+    // `${id}_${id}`. The plain id is what the training gate and progress count
+    // match against; the gate still normalises the legacy composite for drivers
+    // who completed training on older builds.
     await DriverModel.findByIdAndUpdate(driverId, {
-      $addToSet: { completedLessons: `${moduleId}_${lessonId}` },
+      $addToSet: { completedLessons: lessonId },
     });
 
     req.msg = "lesson_completed";
@@ -1929,13 +2422,33 @@ export const getTrainingProgress = async (
 
     const driver =
       await DriverModel.findById(driverId).select("completedLessons");
-    const completedCount = driver?.completedLessons?.length || 0;
-    const totalLessons = 16;
+
+    // Count the material that actually exists. This was `const totalLessons = 16`
+    // — a number unrelated to the catalog, which currently holds 1 active
+    // material. A driver who finished everything saw 6% and could never reach
+    // 100%, so any gate keyed on this percentage would stay shut forever.
+    const totalLessons = await TrainingMaterial.countDocuments({
+      isActive: true,
+    });
+
+    // Dedupe by normalised material id (a material may appear both as the plain
+    // id and as the legacy `${id}_${id}` composite), then cap at the
+    // denominator — completedLessons is an unvalidated string bag that also
+    // retains entries for material since deleted/deactivated, so it can
+    // otherwise report >100%.
+    const normalised = new Set(
+      (driver?.completedLessons || []).map((e) => String(e).split("_")[0]),
+    );
+    const completedCount = Math.min(normalised.size, totalLessons);
 
     req.rData = {
       completedLessons: completedCount,
       totalLessons,
-      progressPercentage: Math.round((completedCount / totalLessons) * 100),
+      // An empty catalog is vacuously complete, and must not divide by zero.
+      progressPercentage:
+        totalLessons === 0
+          ? 100
+          : Math.round((completedCount / totalLessons) * 100),
     };
     req.msg = "progress_fetched";
     next();
@@ -1989,11 +2502,122 @@ export const getBadges = async (
       status: "CANCELLED",
     });
 
-    // Check KYC status
-    const driverFull = await DriverModel.findById(driverObjectId)
-      .select("kyc")
+    // Check KYC status. This read `DriverModel...select("kyc").kyc.isVerified`,
+    // but Driver has no `kyc` path — KYC lives in its own DriverKyc document. So
+    // isKycVerified was always false and the badge showed "Complete KYC to
+    // unlock" forever, even for a fully verified driver.
+    const kycDoc = await DriverKycModel.findOne({ driverId: driverObjectId })
+      .select("isVerified")
       .lean();
-    const isKycVerified = (driverFull as any)?.kyc?.isVerified === true;
+    const isKycVerified = (kycDoc as any)?.isVerified === true;
+
+    // Stats for the wider catalog — every figure below is real driver data.
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const badgeFareConfig = await FareConfig.findOne({ isActive: true })
+      .select("peakHourStart peakHourEnd")
+      .lean();
+    const peakStart = Number((badgeFareConfig as any)?.peakHourStart ?? 8);
+    const peakEnd = Number((badgeFareConfig as any)?.peakHourEnd ?? 11);
+
+    const [
+      earningsAgg,
+      longHaulCount,
+      activeDaysAgg,
+      onTimeCount,
+      peakCount,
+      sosCount,
+      referralCount,
+      feedbackCount,
+      trainingStatus,
+    ] = await Promise.all([
+      // Lifetime settled earnings + best calendar month, in one pass.
+      BookingModel.aggregate([
+        { $match: { driverId: driverObjectId, status: "COMPLETED" } },
+        {
+          $group: {
+            _id: {
+              year: { $year: "$completedAt" },
+              month: { $month: "$completedAt" },
+            },
+            monthEarnings: { $sum: { $ifNull: ["$driverEarnings", 0] } },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: "$monthEarnings" },
+            bestMonth: { $max: "$monthEarnings" },
+          },
+        },
+      ]),
+      // Long-haul: completed trips of 25 km or more.
+      BookingModel.countDocuments({
+        driverId: driverObjectId,
+        status: "COMPLETED",
+        distanceKm: { $gte: 25 },
+      }),
+      // Distinct days with a completed trip in the last 7 days.
+      BookingModel.aggregate([
+        {
+          $match: {
+            driverId: driverObjectId,
+            status: "COMPLETED",
+            completedAt: { $gte: sevenDaysAgo },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              $dateToString: { format: "%Y-%m-%d", date: "$completedAt" },
+            },
+          },
+        },
+        { $count: "days" },
+      ]),
+      // Scheduled pickups reached within 15 minutes of the slot.
+      BookingModel.countDocuments({
+        driverId: driverObjectId,
+        status: "COMPLETED",
+        isScheduled: true,
+        scheduledAt: { $ne: null },
+        pickedAt: { $ne: null },
+        $expr: {
+          $lte: [
+            "$pickedAt",
+            { $add: ["$scheduledAt", 15 * 60 * 1000] },
+          ],
+        },
+      }),
+      // Trips completed inside the configured peak-hour window.
+      BookingModel.countDocuments({
+        driverId: driverObjectId,
+        status: "COMPLETED",
+        $expr: {
+          $and: [
+            { $gte: [{ $hour: "$completedAt" }, peakStart] },
+            { $lt: [{ $hour: "$completedAt" }, peakEnd] },
+          ],
+        },
+      }),
+      // SOS incidents involving this driver.
+      mongoose.connection
+        .collection("sosalerts")
+        .countDocuments({ driverId: driverObjectId })
+        .catch(() => 0),
+      // Drivers who joined with this driver's referral.
+      DriverModel.countDocuments({ referredBy: driverObjectId }),
+      // Support tickets / feedback this driver has raised.
+      mongoose.connection
+        .collection("supporttickets")
+        .countDocuments({ driverId: driverObjectId })
+        .catch(() => 0),
+      getTrainingGateStatus(String(driverId)).catch(() => null),
+    ]);
+
+    const totalEarnings = Number(earningsAgg[0]?.total || 0);
+    const bestMonthEarnings = Number(earningsAgg[0]?.bestMonth || 0);
+    const activeDays = Number(activeDaysAgg[0]?.days || 0);
+    const trainingComplete = (trainingStatus as any)?.complete === true;
 
     // Evaluate each badge
     const badgesWithStatus = allBadges.map((badge: any) => {
@@ -2031,6 +2655,70 @@ export const getBadges = async (
               cancelledCount === 0
                 ? "Perfect Reliability"
                 : `${cancelledCount} cancellations`;
+            break;
+          case "training_completed":
+            isUnlocked = trainingComplete;
+            progress = trainingComplete ? 1 : 0;
+            progressTarget = 1;
+            progressLabel = trainingComplete
+              ? "Ready for Orders!"
+              : "Finish required training to unlock";
+            break;
+          case "earnings":
+            isUnlocked = totalEarnings >= badge.unlockValue;
+            progress = Math.min(totalEarnings, badge.unlockValue);
+            progressLabel = `₹${Math.round(totalEarnings).toLocaleString(
+              "en-IN",
+            )} earned`;
+            break;
+          case "monthly_earnings":
+            isUnlocked = bestMonthEarnings >= badge.unlockValue;
+            progress = Math.min(bestMonthEarnings, badge.unlockValue);
+            progressLabel = `Best month: ₹${Math.round(
+              bestMonthEarnings,
+            ).toLocaleString("en-IN")}`;
+            break;
+          case "long_distance":
+            isUnlocked = longHaulCount >= badge.unlockValue;
+            progress = Math.min(longHaulCount, badge.unlockValue);
+            progressLabel = `${longHaulCount} long-haul trips (25km+)`;
+            break;
+          case "consistency":
+            isUnlocked = activeDays >= badge.unlockValue;
+            progress = Math.min(activeDays, badge.unlockValue);
+            progressLabel = `Active ${activeDays} of last 7 days`;
+            break;
+          case "on_time":
+            isUnlocked = onTimeCount >= badge.unlockValue;
+            progress = Math.min(onTimeCount, badge.unlockValue);
+            progressLabel = `${onTimeCount} on-time scheduled pickups`;
+            break;
+          case "peak_hours":
+            isUnlocked = peakCount >= badge.unlockValue;
+            progress = Math.min(peakCount, badge.unlockValue);
+            progressLabel = `${peakCount} peak-hour trips`;
+            break;
+          case "safety":
+            // Real record: enough trips, no cancellations, no SOS incidents.
+            isUnlocked =
+              totalTrips >= badge.unlockValue &&
+              cancelledCount === 0 &&
+              Number(sosCount) === 0;
+            progress = Math.min(totalTrips, badge.unlockValue);
+            progressLabel =
+              Number(sosCount) === 0 && cancelledCount === 0
+                ? `${totalTrips}/${badge.unlockValue} incident-free trips`
+                : "Incident on record";
+            break;
+          case "feedback":
+            isUnlocked = Number(feedbackCount) >= badge.unlockValue;
+            progress = Math.min(Number(feedbackCount), badge.unlockValue);
+            progressLabel = `${feedbackCount} feedback shared`;
+            break;
+          case "referrals":
+            isUnlocked = referralCount >= badge.unlockValue;
+            progress = Math.min(referralCount, badge.unlockValue);
+            progressLabel = `${referralCount} drivers referred`;
             break;
           default:
             progressLabel = isUnlocked ? badge.description : "Not yet unlocked";
@@ -2131,6 +2819,105 @@ export const getIncentives = async (
     req.rData = (await IncentiveService.getDriverIncentiveSummary(
       driverId,
     )) as any;
+    req.msg = "incentives_fetched";
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Reviews customers have left for this driver.
+ *
+ * The design shows a reviews list on the driver's home screen, but there was no
+ * way to read one: ratings are written onto the booking by rateBooking and were
+ * never surfaced back to the driver at all. No new collection is needed — the
+ * ratings already exist, they were just invisible.
+ */
+export const getDriverReviews = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  try {
+    const driverId = new Types.ObjectId((req as any).driverId);
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 50);
+
+    const match = {
+      driverId,
+      status: "COMPLETED",
+      rating: { $exists: true, $ne: null, $gt: 0 },
+    };
+
+    const [rows, total, summaryAgg, breakdownAgg] = await Promise.all([
+      BookingModel.find(match)
+        .sort({ completedAt: -1, createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .select("bookingNumber rating review feedback completedAt userId")
+        .populate("userId", "fullName profileImage")
+        .lean(),
+      BookingModel.countDocuments(match),
+      BookingModel.aggregate([
+        { $match: match },
+        { $group: { _id: null, average: { $avg: "$rating" }, count: { $sum: 1 } } },
+      ]),
+      // Star distribution, for the ratings bar chart in the design.
+      BookingModel.aggregate([
+        { $match: match },
+        { $group: { _id: "$rating", n: { $sum: 1 } } },
+      ]),
+    ]);
+
+    const breakdown: Record<string, number> = { "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 };
+    for (const b of breakdownAgg as any[]) {
+      const k = String(Math.round(b._id));
+      if (breakdown[k] !== undefined) breakdown[k] = b.n;
+    }
+
+    req.rData = {
+      reviews: (rows as any[]).map((b) => ({
+        id: String(b._id),
+        bookingNumber: b.bookingNumber,
+        rating: b.rating,
+        // rateBooking stores the written text in `review` and tag chips in
+        // `feedback`; older rows only have one of them.
+        comment: b.review || b.feedback || "",
+        customerName: (b.userId as any)?.fullName || "Customer",
+        customerPhoto: (b.userId as any)?.profileImage || "",
+        ratedAt: b.completedAt ?? null,
+      })),
+      summary: {
+        average:
+          Math.round(((summaryAgg as any[])[0]?.average ?? 0) * 10) / 10,
+        count: (summaryAgg as any[])[0]?.count ?? 0,
+        breakdown,
+      },
+      page,
+      limit,
+      total,
+    } as any;
+    req.msg = "reviews_fetched";
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
+/** Bonuses this driver has actually been awarded and is owed. */
+export const getIncentiveHistory = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  try {
+    const driverId = (req as any).driverId;
+    const items = await IncentiveService.getDriverIncentiveHistory(driverId);
+    req.rData = {
+      items,
+      total: items.reduce((sum: number, i: any) => sum + (i.amount ?? 0), 0),
+    } as any;
     req.msg = "incentives_fetched";
     next();
   } catch (error) {
@@ -2446,15 +3233,26 @@ export const verifyOnboardingPayment = async (
       },
     );
 
-    // Also update driver-level flag
+    // Also update driver-level flag. An already-onboarded driver adding another
+    // vehicle must KEEP their active status: the new vehicle's own
+    // verificationStatus (set above) is what admin reviews. Demoting the driver
+    // here used to strand them on the onboarding VerificationScreen, which only
+    // exits on active/approved — locking them out of the dashboard entirely.
+    const driverDoc = await DriverModel.findById(driverId).select("status");
+    const alreadyOnboarded = ["active", "approved"].includes(
+      driverDoc?.status ?? "",
+    );
+
     await DriverModel.findByIdAndUpdate(driverId, {
       onboardingFeePaid: true,
       onboardingPaymentId: paymentId,
-      status: "under_verification",
+      ...(alreadyOnboarded ? {} : { status: "under_verification" }),
     });
 
     req.rData = {
-      status: "under_verification",
+      status: alreadyOnboarded
+        ? driverDoc?.status
+        : "under_verification",
       vehicleId: targetIds[0],
       vehicleIds: targetIds,
       paidCount: targetIds.length,

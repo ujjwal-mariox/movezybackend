@@ -56,6 +56,8 @@ export interface ILoadingUnloading {
   type: LoadingUnloadingType;
   pickupFloor?: number;
   dropFloor?: number;
+  // Declared by the customer per booking; the loading partner plans around it.
+  isLiftAvailable?: boolean;
   charge?: number;
 }
 
@@ -111,6 +113,17 @@ export interface IBooking {
   coinDiscount?: number;
   coinsEarned?: number;
 
+  /**
+   * What the driver actually earned on this trip, frozen at completion.
+   * Payouts derive from this rather than from `finalFare`, because finalFare
+   * includes the customer's GST — paying it out handed drivers tax money the
+   * platform owes the government — and carried no commission.
+   */
+  driverEarnings?: number;
+  /** The commission rate applied when this trip completed, for auditability. */
+  commissionPercent?: number;
+  commissionAmount?: number;
+
   // Enterprise
   enterpriseDiscount?: number;
 
@@ -151,6 +164,8 @@ export interface IBooking {
   scheduledAt?: Date;
   isScheduled?: boolean;
   scheduledSlot?: string;
+  /** The TimeSlot the customer picked (was dropped by strict mode before). */
+  scheduledTimeSlotId?: Types.ObjectId;
   assignedAt?: Date;
   driverArrivedAt?: Date;
   pickedAt?: Date;
@@ -169,6 +184,12 @@ export interface IBooking {
     actualDropTime?: Date;
   };
   otp?: string;
+  deliveryOtp?: string;
+
+  // Consignee (parcel receiver at the drop location) — reachable only by SMS.
+  receiverName?: string;
+  receiverPhone?: string;
+  consigneeNotifiedAt?: Date;
 
   // Invoice & Consignment
   invoiceId?: Types.ObjectId;

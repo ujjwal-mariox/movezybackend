@@ -10,7 +10,8 @@ import AddonService from "../models/addon-service.model";
 import GoodsType from "../models/goods-type.model";
 import CancellationReason from "../models/cancellation-reason.model";
 import ProhibitedItem from "../models/prohibited-item.model";
-import { TimeSlot } from "../models/time-slot.model";
+import { TimeSlot, ScheduleConfig } from "../models/time-slot.model";
+import { FareConfig } from "../models/app-config.model";
 import * as FareService from "../services/fare.service";
 import * as PromoService from "../services/promo.service";
 import * as CoinService from "../services/coin.service";
@@ -21,29 +22,97 @@ import * as NotificationService from "../services/notification.service";
 import { emitToUser } from "../utils/socket.util";
 import UserGST from "../models/user-gst.model";
 import { cache } from "../utils/redis.util";
+import { getDistanceForLegs } from "../services/routing.service";
 import { Types } from "mongoose";
 
+/** Guards against a client declaring a 10,000-floor building. */
+const MAX_FLOORS = 50;
+/** Heaviest load any vehicle in the catalog can take, as a sanity bound. */
+const MAX_GOODS_KG = 10000;
+
 /**
- * Calculate distance between two coordinates using the Haversine formula.
- * Returns distance in kilometers.
+ * Weight the customer declares. Like floors, the server cannot verify it — but
+ * it is only ever used as a quantity, never as a price.
  */
-function haversineDistance(
-  lat1: number, lon1: number,
-  lat2: number, lon2: number
-): number {
-  const R = 6371; // Earth's radius in km
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  // Multiply by 1.3 to approximate road distance vs straight-line
-  return Math.round(R * c * 1.3 * 10) / 10;
-}
+const resolveGoodsWeight = (goodsWeight: any) => {
+  const v = Number(goodsWeight);
+  if (!Number.isFinite(v) || v <= 0) return 0;
+  return Math.min(Math.round(v), MAX_GOODS_KG);
+};
+
+/**
+ * Floors a customer declares for the trip. The server cannot know which floor
+ * someone lives on, so these are declared *data* — but they are only ever used
+ * as a quantity. The price itself always comes from the AddonService document,
+ * never from the request.
+ */
+const resolveFloors = (loadingUnloading: any) => {
+  const clamp = (n: any) => {
+    const v = Math.floor(Number(n));
+    if (!Number.isFinite(v) || v < 0) return 0;
+    return Math.min(v, MAX_FLOORS);
+  };
+  return {
+    pickupFloor: clamp(loadingUnloading?.pickupFloor),
+    dropFloor: clamp(loadingUnloading?.dropFloor),
+    isLiftAvailable: Boolean(loadingUnloading?.isLiftAvailable),
+  };
+};
+
+/**
+ * Turn addon ids into priced line items. `price` and `priceType` are read from
+ * the database; the client only ever contributes declared quantities.
+ */
+const resolveAddonsForFare = async (
+  addons: any[] | undefined,
+  floors: { pickupFloor: number; dropFloor: number },
+  goodsKg: number = 0
+) => {
+  if (!addons || addons.length === 0) return [];
+  const addonIds = addons
+    .map((a: any) => a.addonServiceId || a.addonId || a._id)
+    .filter(Boolean);
+  if (addonIds.length === 0) return [];
+
+  const addonDocs = await AddonService.find({
+    _id: { $in: addonIds },
+    isActive: true,
+  });
+
+  // Floors climbed across the trip. Always at least 1: the service still
+  // happens on a ground-floor job, so it must not bill zero.
+  const floorUnits = Math.max(1, floors.pickupFloor + floors.dropFloor);
+  // Same rule for weight: a declared 0 still means the work happened.
+  const kgUnits = Math.max(1, goodsKg);
+
+  // Loading/unloading is priced PER PARTNER, not per floor — floors and lift
+  // are inputs the customer declares, not multipliers on the bill.
+  //
+  // Derived here from the (already bounded) goods weight rather than taken from
+  // the request: partner count multiplies the charge, so a client-supplied
+  // value would be the same manipulation hole `loadingUnloadingCharge` was.
+  const KG_PER_PARTNER = 100;
+  const LOADING_CODES = new Set(["LDUNLD", "LDING", "UNLD"]);
+  const partnerCount = Math.max(1, Math.ceil(goodsKg / KG_PER_PARTNER));
+
+  return addonDocs.map((doc) => ({
+    addonId: doc._id,
+    name: doc.name,
+    price: doc.price,
+    quantity: LOADING_CODES.has(doc.code) ? partnerCount : 1,
+    // Without this the fare service treated every add-on as FIXED, so
+    // Insurance (2% of order value) billed a flat ₹2.
+    priceType: doc.priceType,
+    // PER_FLOOR and PER_KG add-ons had no units, so they silently billed one
+    // flat unit while the app advertised "₹50/floor" and "₹25/kg".
+    units:
+      doc.priceType === "PER_FLOOR"
+        ? floorUnits
+        : doc.priceType === "PER_KG"
+          ? kgUnits
+          : undefined,
+  }));
+};
 
 /**
  * Get fare estimate for a booking
@@ -57,23 +126,37 @@ export const getFareEstimate = async (req: Request, res: Response) => {
       vehicleTypeId,
       serviceType,
       addons,
-      loadingUnloadingCharge,
+      loadingUnloading,
+      goodsWeight,
       promoCode,
       useCoins,
     } = req.body;
+    // `loadingUnloadingCharge` is deliberately NOT read from the body. It used
+    // to be, and it was added straight into the subtotal — so a client could
+    // post a negative charge and collapse any trip to the minimum fare
+    // (verified: a ₹177 estimate became ₹59 with loadingUnloadingCharge:-100).
+    // The client may send floors as *data*; only the server prices them.
 
     let { distanceKm, durationMin } = req.body;
 
-    // If pickup/drop coordinates provided but distance/duration not, calculate them
-    if (!distanceKm && pickup?.lat && pickup?.lng && drop?.lat && drop?.lng) {
-      distanceKm = haversineDistance(
-        pickup.lat, pickup.lng,
-        drop.lat, drop.lng
-      );
-      // Estimate duration at ~25 km/h average city speed
-      durationMin = Math.ceil((distanceKm / 25) * 60);
-      // Minimum 5 minutes
-      if (durationMin < 5) durationMin = 5;
+    // Server-authoritative ROAD distance whenever coordinates are present —
+    // overriding any client-sent figure. The old straight-line haversine
+    // underquoted real road trips by ~25-35% (Delhi→Noida: 19.8 km straight
+    // vs 26.3 km by road), and trusting the client's number let stale app
+    // builds underquote themselves. Routed through stops in order; falls back
+    // to haversine per-leg only if the router is unreachable.
+    if (pickup?.lat && pickup?.lng && drop?.lat && drop?.lng) {
+      const resolved = await getDistanceForLegs([
+        pickup,
+        ...(Array.isArray(stops)
+          ? stops.filter((st: any) => st?.lat != null && st?.lng != null)
+          : []),
+        drop,
+      ]);
+      if (resolved) {
+        distanceKm = resolved.distanceKm;
+        durationMin = resolved.durationMin;
+      }
     }
 
     if (!distanceKm || !durationMin || !vehicleTypeId) {
@@ -83,24 +166,12 @@ export const getFareEstimate = async (req: Request, res: Response) => {
       });
     }
 
-    // Resolve addon prices from database if only IDs are sent
-    let resolvedAddons: any[] = [];
-    if (addons && addons.length > 0) {
-      const addonIds = addons.map(
-        (a: any) => a.addonServiceId || a.addonId || a._id
-      ).filter(Boolean);
-      if (addonIds.length > 0) {
-        const addonDocs = await AddonService.find({
-          _id: { $in: addonIds },
-          isActive: true,
-        });
-        resolvedAddons = addonDocs.map((doc) => ({
-          addonId: doc._id,
-          price: doc.price,
-          quantity: 1,
-        }));
-      }
-    }
+    const floors = resolveFloors(loadingUnloading);
+    const resolvedAddons = await resolveAddonsForFare(
+      addons,
+      floors,
+      resolveGoodsWeight(goodsWeight)
+    );
 
     // Calculate fare
     const fareBreakdown = await FareService.calculateFare({
@@ -109,7 +180,9 @@ export const getFareEstimate = async (req: Request, res: Response) => {
       durationMin,
       serviceType: serviceType || "WITHIN_CITY",
       addons: resolvedAddons,
-      loadingUnloadingCharge: loadingUnloadingCharge || 0,
+      // Loading/unloading is priced through the add-ons above. It is never
+      // taken from the request — see the note on the destructure.
+      loadingUnloadingCharge: 0,
       stops: stops?.length || 0,
     });
 
@@ -153,6 +226,14 @@ export const getFareEstimate = async (req: Request, res: Response) => {
         promoDiscount,
         coinDiscount,
         finalAmount: Math.max(finalAmount, 0),
+        // What this trip will actually earn in coins, from the same service
+        // that credits them at completion. The app computed `fare / 100`
+        // itself and so advertised half the real rate (the server awards 2
+        // coins per ₹100), quietly under-promising on every quote.
+        coinsToEarn: await CoinService.calculateCoinsEarned(
+          Math.max(finalAmount, 0),
+          "",
+        ),
       },
     });
   } catch (error: any) {
@@ -199,51 +280,108 @@ export const createBooking = async (req: Request, res: Response) => {
       receiverPhone,
     } = req.body;
 
+    // The map picker's on-screen labels must never be stored as a real address.
+    // Older app builds returned whatever was showing when Confirm was tapped, so
+    // bookings exist with a drop address of "Move the map to select location".
+    // The client is fixed, but old installs still POST it — so sanitise here
+    // too and fall back to the coordinates, which are always present.
+    const PLACEHOLDER_ADDRESSES = [
+      "move the map to select location",
+      "loading...",
+      "address not found",
+      "pick up from your location",
+    ];
+    const cleanAddress = (
+      raw: unknown,
+      loc: { lat?: number; lng?: number } | undefined,
+      fallbackLabel: string,
+    ): string => {
+      const s = typeof raw === "string" ? raw.trim() : "";
+      if (s && !PLACEHOLDER_ADDRESSES.includes(s.toLowerCase())) return s;
+      return typeof loc?.lat === "number" && typeof loc?.lng === "number"
+        ? `${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)}`
+        : fallbackLabel;
+    };
+    const safePickupAddress = cleanAddress(
+      pickupAddress,
+      pickupLocation,
+      "Pickup Location",
+    );
+    const safeDropAddress = cleanAddress(
+      dropAddress,
+      dropLocation,
+      "Drop Location",
+    );
+
     // Validate required fields
-    if (
-      !pickupLocation ||
-      !dropLocation ||
-      !vehicleTypeId ||
-      !distanceKm ||
-      !durationMin
-    ) {
+    // distanceKm/durationMin are no longer required from the client — they're
+    // resolved from the route below. They're still accepted as a fallback for
+    // the case where the router is unreachable AND coordinates are missing.
+    const hasRouteCoords =
+      pickupLocation?.lat != null &&
+      pickupLocation?.lng != null &&
+      dropLocation?.lat != null &&
+      dropLocation?.lng != null;
+
+    if (!pickupLocation || !dropLocation || !vehicleTypeId) {
       return res.status(400).json({
         success: false,
         message:
-          "Required fields missing (pickupLocation, dropLocation, vehicleTypeId, distanceKm, durationMin)",
+          "Required fields missing (pickupLocation, dropLocation, vehicleTypeId)",
       });
     }
 
-    // Resolve addon details from database
-    let resolvedAddons: any[] = [];
-    if (addons && addons.length > 0) {
-      const addonIds = addons.map(
-        (a: any) => a.addonServiceId || a.addonId || a._id
-      ).filter(Boolean);
-      if (addonIds.length > 0) {
-        const addonDocs = await AddonService.find({
-          _id: { $in: addonIds },
-          isActive: true,
-        });
-        resolvedAddons = addonDocs.map((doc) => ({
-          addonId: doc._id,
-          name: doc.name,
-          price: doc.price,
-          quantity: 1,
-        }));
+    if (!hasRouteCoords && (!distanceKm || !durationMin)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Pickup and drop coordinates are required (or distanceKm and durationMin)",
+      });
+    }
+
+    // Server-authoritative road distance, matching getFareEstimate exactly —
+    // both hit the same cached route, so the booked fare can never drift from
+    // the quote the customer accepted. Client figures remain only as the
+    // fallback when the router is unreachable.
+    let bookingDistanceKm = distanceKm;
+    let bookingDurationMin = durationMin;
+    if (hasRouteCoords) {
+      const resolvedRoute = await getDistanceForLegs([
+        pickupLocation,
+        ...(Array.isArray(stops)
+          ? stops.filter((st: any) => st?.lat != null && st?.lng != null)
+          : []),
+        dropLocation,
+      ]);
+      if (resolvedRoute) {
+        bookingDistanceKm = resolvedRoute.distanceKm;
+        bookingDurationMin = resolvedRoute.durationMin;
       }
     }
+
+    // Resolve addon details from database.
+    // This used the same shape as the estimate but omitted `priceType`, so the
+    // booking priced every add-on as FIXED while the estimate priced it
+    // correctly — Insurance quoted 2% of the order and then billed ₹2.
+    // Both paths now go through one resolver so they cannot drift again.
+    const bookingFloors = resolveFloors(loadingUnloading);
+    const resolvedAddons = await resolveAddonsForFare(
+      addons,
+      bookingFloors,
+      resolveGoodsWeight(goodsWeight)
+    );
 
     // Calculate fare
     const fareBreakdown = await FareService.calculateFare({
       vehicleTypeId,
-      distanceKm,
-      durationMin,
+      distanceKm: bookingDistanceKm,
+      durationMin: bookingDurationMin,
       serviceType: serviceType || "WITHIN_CITY",
       addons: resolvedAddons,
-      loadingUnloadingCharge:
-        loadingUnloading?.loadingCharge + loadingUnloading?.unloadingCharge ||
-        0,
+      // Was `loadingUnloading?.loadingCharge + loadingUnloading?.unloadingCharge`
+      // — a price straight from the request body. Loading/unloading is priced
+      // through the add-ons above; the client only declares floors.
+      loadingUnloadingCharge: 0,
       stops: stops?.length || 0,
     });
 
@@ -340,7 +478,11 @@ export const createBooking = async (req: Request, res: Response) => {
     }
 
     // Calculate totals for required schema fields
-    const addonTotal = resolvedAddons.reduce((sum: number, a: any) => sum + (a.price * (a.quantity || 1)), 0);
+    // Use the figure the fare service actually charged. Re-deriving it as
+    // price × quantity ignored priceType, so the stored addonTotal (and the
+    // invoice built from it) disagreed with the money taken: a 2% Insurance
+    // add-on on a ₹5,000 order was recorded as ₹2 instead of ₹100.
+    const addonTotal = fareBreakdown.addonCharges || 0;
     const subtotalAmount = fareBreakdown.baseFare + fareBreakdown.distanceCharge + (fareBreakdown.timeCharge || 0) + (fareBreakdown.surgeCharge || 0) + addonTotal;
     const totalDiscount = promoDiscount + coinDiscount;
     const finalFare = Math.max(totalAmount, 0);
@@ -352,12 +494,12 @@ export const createBooking = async (req: Request, res: Response) => {
       serviceType: serviceType || "WITHIN_CITY",
       // Schema expects `pickup` and `drop` as LocationSchema (address, lat, lng)
       pickup: {
-        address: pickupAddress || "Pickup Location",
+        address: safePickupAddress,
         lat: pickupLocation.lat,
         lng: pickupLocation.lng,
       },
       drop: {
-        address: dropAddress || "Drop Location",
+        address: safeDropAddress,
         lat: dropLocation.lat,
         lng: dropLocation.lng,
       },
@@ -371,11 +513,15 @@ export const createBooking = async (req: Request, res: Response) => {
       vehicleTypeId,
       goodsType: resolvedGoodsType,
       goodsDescription,
-      goodsWeight,
+      // Store the validated figure the fare was actually priced from, not the
+      // raw body value — the driver needs to know the weight they're lifting.
+      goodsWeight: resolveGoodsWeight(goodsWeight),
       goodsQuantity,
-      // Schema field names (NOT distance/estimatedDuration)
-      distanceKm,
-      durationMin,
+      // Schema field names (NOT distance/estimatedDuration).
+      // The resolved road figures — the same ones the fare was priced from, so
+      // the invoice and trip screen can't show a distance nobody was charged for.
+      distanceKm: bookingDistanceKm,
+      durationMin: bookingDurationMin,
       baseFare: fareBreakdown.baseFare,
       distanceCharge: fareBreakdown.distanceCharge,
       timeCharge: fareBreakdown.timeCharge || 0,
@@ -388,10 +534,17 @@ export const createBooking = async (req: Request, res: Response) => {
         quantity: addon.quantity || 1,
       })),
       addonTotal,
-      loadingUnloading: loadingUnloading || {
-        type: "NONE",
-        pickupFloor: 0,
-        dropFloor: 0,
+      // Store the floors the customer declared (validated/clamped), not
+      // whatever the request body happened to contain — `charge` in particular
+      // must never come from the client. The driver needs the floor count on
+      // arrival, and it is what the PER_FLOOR add-ons were priced from.
+      loadingUnloading: {
+        type: loadingUnloading?.type || "NONE",
+        pickupFloor: bookingFloors.pickupFloor,
+        dropFloor: bookingFloors.dropFloor,
+        // resolveFloors already validates it; it was computed and then dropped,
+        // so the partner never learned lift vs stairs.
+        isLiftAvailable: bookingFloors.isLiftAvailable,
         charge: 0,
       },
       promoCodeId,
@@ -411,6 +564,8 @@ export const createBooking = async (req: Request, res: Response) => {
       // Pickup OTP the customer shows the driver (driver enters it at pickup to
       // move DRIVER_ARRIVED → PICKED). Generated at creation so it always exists.
       otp: String(Math.floor(1000 + Math.random() * 9000)),
+      // Read out by the RECEIVER at the drop; gates completeTrip.
+      deliveryOtp: String(Math.floor(1000 + Math.random() * 9000)),
       // Schema enum: DRAFT, SEARCHING, ASSIGNED, DRIVER_ARRIVED, PICKED, IN_PROGRESS, COMPLETED, CANCELLED
       status: scheduledDate ? "DRAFT" : "SEARCHING",
       isScheduled: !!scheduledDate,
@@ -422,6 +577,21 @@ export const createBooking = async (req: Request, res: Response) => {
     });
 
     await booking.save({ session });
+
+    // Record the promo usage in the same transaction as the booking, so a
+    // discounted booking can never exist without its usage row. Without this
+    // the discount was granted but never counted, and every code stayed
+    // infinitely reusable.
+    if (promoCodeId && promoDiscount > 0) {
+      await PromoService.applyPromoCode(
+        promoCodeId,
+        userId,
+        booking._id as Types.ObjectId,
+        promoDiscount,
+        session,
+      );
+    }
+
     await session.commitTransaction();
 
     // Dispatch booking to nearby drivers (bell ringing)
@@ -474,7 +644,7 @@ export const getUserBookings = async (req: Request, res: Response) => {
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(Number(limit))
-        .populate("vehicleTypeId", "name icon")
+        .populate("vehicleTypeId", "name icon image")
         .populate("driverId", "fullName mobileNumber profilePhoto"),
       Booking.countDocuments(query),
     ]);
@@ -510,7 +680,7 @@ export const getBookingById = async (req: Request, res: Response) => {
     // NOTE: Booking has no `vehicleId` field (only vehicleTypeId) — populating it
     // throws a Mongoose strictPopulate error (500). Removed.
     const booking = await Booking.findOne({ _id: bookingId, userId })
-      .populate("vehicleTypeId", "name icon capacity")
+      .populate("vehicleTypeId", "name icon image capacity")
       .populate("driverId", "fullName mobileNumber profilePhoto rating");
 
     if (!booking) {
@@ -543,7 +713,7 @@ export const trackBooking = async (req: Request, res: Response) => {
     // `vehicleId` is not a schema path — populating it 500s (strictPopulate). Removed.
     const booking = await Booking.findOne({ _id: bookingId, userId })
       .populate("driverId", "fullName mobileNumber profilePhoto rating")
-      .populate("vehicleTypeId", "name icon");
+      .populate("vehicleTypeId", "name icon image");
 
     if (!booking) {
       return res.status(404).json({
@@ -552,10 +722,16 @@ export const trackBooking = async (req: Request, res: Response) => {
       });
     }
 
-    // Get driver's current location from cache
+    // Get driver's current location from cache.
+    // driverId is POPULATED above, so interpolating it directly stringified the
+    // whole document and never matched the `driver:location:<id>` key the socket
+    // layer writes — driverLocation came back null on every tracked booking.
     let driverLocation = null;
     if (booking.driverId) {
-      driverLocation = await cache.get(`driver:location:${booking.driverId}`);
+      const driverIdStr = String(
+        (booking.driverId as any)?._id ?? booking.driverId,
+      );
+      driverLocation = await cache.get(`driver:location:${driverIdStr}`);
     }
 
     res.json({
@@ -734,7 +910,7 @@ export const getScheduledBookings = async (req: Request, res: Response) => {
       status: { $nin: ["COMPLETED", "CANCELLED"] },
     })
       .sort({ scheduledAt: 1 })
-      .populate("vehicleTypeId", "name icon");
+      .populate("vehicleTypeId", "name icon image");
 
     res.json({
       success: true,
@@ -811,12 +987,39 @@ export const cancelBooking = async (req: Request, res: Response) => {
       });
     }
 
-    // Get cancellation reason for penalty calculation
-    let refundPercentage = 100;
+    // Refund policy: the reason's percentage, capped by how far the trip got.
+    //
+    // This used to be a flat 100% — and 100% again when no reason was sent, so
+    // the commonest path refunded everything even at IN_PROGRESS with the
+    // goods already loaded and the driver mid-route. (The old
+    // `status !== "PENDING"` guard was dead: PENDING is a payment status, not
+    // a booking one, so it was never false.) Ceilings live in FareConfig so
+    // the policy stays the admin's to set, not the code's.
+    const cancelStage = booking.status;
+    const refundConfig = await FareConfig.findOne({ isActive: true })
+      .select(
+        "refundBeforeAssignPercent refundAfterAssignPercent refundAfterPickupPercent",
+      )
+      .lean();
+
+    const stageCeiling =
+      cancelStage === "DRAFT" || cancelStage === "SEARCHING"
+        ? Number((refundConfig as any)?.refundBeforeAssignPercent ?? 100)
+        : cancelStage === "ASSIGNED" || cancelStage === "DRIVER_ARRIVED"
+          ? Number((refundConfig as any)?.refundAfterAssignPercent ?? 100)
+          : // PICKED / IN_PROGRESS — goods are aboard.
+            Number((refundConfig as any)?.refundAfterPickupPercent ?? 0);
+
+    let refundPercentage = stageCeiling;
     if (cancellationReasonId) {
       const reason = await CancellationReason.findById(cancellationReasonId);
-      if (reason && booking.status !== "PENDING") {
-        refundPercentage = reason.refundPercentage;
+      if (reason) {
+        // The reason can only ever reduce the refund, never raise it past the
+        // stage ceiling.
+        refundPercentage = Math.min(
+          Number(reason.refundPercentage ?? 100),
+          stageCeiling,
+        );
       }
       booking.cancellationReasonId = cancellationReasonId;
     }
@@ -867,7 +1070,19 @@ export const cancelBooking = async (req: Request, res: Response) => {
       }
     }
 
-    // 3. Notify the assigned driver (socket + push) so they stop heading there.
+    // 3. Free the driver. Completing a trip and driver-side cancel both clear
+    // currentBookingId, but user-side cancel never did — so the admin tracking
+    // map kept showing the driver as busy until their NEXT trip completed.
+    // Conditional on it still pointing at this booking, so a driver who has
+    // already moved on is untouched.
+    if (assignedDriverId) {
+      await Driver.updateOne(
+        { _id: assignedDriverId, currentBookingId: booking._id },
+        { currentBookingId: null },
+      ).catch((e) => console.error("Failed to clear currentBookingId:", e));
+    }
+
+    // 4. Notify the assigned driver (socket + push) so they stop heading there.
     if (assignedDriverId) {
       try {
         emitToUser(String(assignedDriverId), "booking:cancelled", {
@@ -1010,20 +1225,71 @@ export const getBookingInvoice = async (req: Request, res: Response) => {
  */
 export const getVehicleOptions = async (req: Request, res: Response) => {
   try {
-    const { serviceType, goodsTypeId, pickup, drop } = req.body;
+    const { serviceType, goodsTypeId, pickup, drop, stops } = req.body;
     let { distanceKm, durationMin } = req.body;
 
-    // Auto-calculate distance from coordinates if not provided
-    if (!distanceKm && pickup?.lat && pickup?.lng && drop?.lat && drop?.lng) {
-      distanceKm = haversineDistance(pickup.lat, pickup.lng, drop.lat, drop.lng);
-      durationMin = Math.max(5, Math.ceil((distanceKm / 25) * 60));
+    // Road distance through the stops in order, resolved server-side whenever
+    // coordinates are present — the same figure getFareEstimate and
+    // createBooking use, so the vehicle list, the estimate and the final bill
+    // all price the same trip.
+    if (pickup?.lat && pickup?.lng && drop?.lat && drop?.lng) {
+      const resolved = await getDistanceForLegs([
+        pickup,
+        ...(Array.isArray(stops)
+          ? stops.filter((s: any) => s?.lat != null && s?.lng != null)
+          : []),
+        drop,
+      ]);
+      if (resolved) {
+        distanceKm = resolved.distanceKm;
+        durationMin = resolved.durationMin;
+      }
     }
 
     if (!distanceKm || !durationMin) {
-      return res.status(400).json({
-        success: false,
-        message: "Provide distanceKm/durationMin or pickup/drop coordinates",
-      });
+      // Coordinates were supplied but resolution produced nothing usable —
+      // never dead-end the customer on "no vehicles" for that. Fall back to
+      // the straight-line approximation (the figure this endpoint used before
+      // road routing) so the list still prices, and log the payload, since
+      // reaching here means the resolver misbehaved.
+      const pLat = Number(pickup?.lat);
+      const pLng = Number(pickup?.lng);
+      const dLat = Number(drop?.lat);
+      const dLng = Number(drop?.lng);
+      const haveCoords =
+        Number.isFinite(pLat) &&
+        Number.isFinite(pLng) &&
+        Number.isFinite(dLat) &&
+        Number.isFinite(dLng) &&
+        !(pLat === 0 && pLng === 0) &&
+        !(dLat === 0 && dLng === 0);
+
+      console.warn(
+        "[VehicleOptions] distance unresolved",
+        JSON.stringify({ pickup, drop, stops, distanceKm, durationMin }),
+      );
+
+      if (haveCoords) {
+        const R = 6371;
+        const dLatR = ((dLat - pLat) * Math.PI) / 180;
+        const dLngR = ((dLng - pLng) * Math.PI) / 180;
+        const h =
+          Math.sin(dLatR / 2) ** 2 +
+          Math.cos((pLat * Math.PI) / 180) *
+            Math.cos((dLat * Math.PI) / 180) *
+            Math.sin(dLngR / 2) ** 2;
+        // ×1.3 road approximation, matching the resolver's own fallback.
+        distanceKm =
+          Math.round(2 * R * Math.asin(Math.sqrt(h)) * 1.3 * 100) / 100;
+        durationMin = Math.max(5, Math.ceil((distanceKm / 25) * 60));
+      }
+
+      if (!distanceKm || !durationMin) {
+        return res.status(400).json({
+          success: false,
+          message: "Provide distanceKm/durationMin or pickup/drop coordinates",
+        });
+      }
     }
 
     // Get all active vehicle types with caching
@@ -1071,7 +1337,9 @@ export const getVehicleOptions = async (req: Request, res: Response) => {
           distanceKm,
           durationMin,
           serviceType: serviceType || "WITHIN_CITY",
-          stops: 0,
+          // Was hardcoded to 0, so every price on Select Vehicle excluded the
+          // per-stop charge the customer would actually be billed.
+          stops: Array.isArray(stops) ? stops.length : 0,
         });
 
         // Recommendation score (higher = better match)
@@ -1209,18 +1477,59 @@ export const getTimeSlots = async (req: Request, res: Response) => {
   try {
     const { date } = req.query;
     const targetDate = date ? new Date(date as string) : new Date();
-    const dayOfWeek = targetDate
-      .toLocaleDateString("en-US", { weekday: "long" })
-      .toUpperCase();
+    if (Number.isNaN(targetDate.getTime())) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid date" });
+    }
 
-    const slots = await TimeSlot.find({
-      isActive: true,
-      daysAvailable: dayOfWeek,
-    }).sort({ startTime: 1 });
+    // NOTE: this used to filter on `daysAvailable: <DAY>` — a field that does
+    // not exist on the TimeSlot schema — so the query matched nothing and this
+    // endpoint returned an empty list on every single call.
+    const slots = await TimeSlot.find({ isActive: true })
+      .sort({ sortOrder: 1, startTime: 1 })
+      .lean();
+
+    // Scheduling rules (how far ahead you may book, and the minimum notice).
+    const cfg = await ScheduleConfig.findOne({});
+    const minAdvanceHours = cfg?.minAdvanceHours ?? 1;
+    const advanceBookingDays = cfg?.advanceBookingDays ?? 7;
+
+    const now = new Date();
+    const startOfToday = new Date(now);
+    startOfToday.setHours(0, 0, 0, 0);
+    const startOfTarget = new Date(targetDate);
+    startOfTarget.setHours(0, 0, 0, 0);
+
+    const daysAhead = Math.round(
+      (startOfTarget.getTime() - startOfToday.getTime()) / 86_400_000,
+    );
+    if (daysAhead < 0 || daysAhead > advanceBookingDays) {
+      return res.json({ success: true, data: [] });
+    }
+
+    // Drop slots that are already gone (or too soon) when booking for today —
+    // offering "2:00 PM" at 4 PM is just a failed booking waiting to happen.
+    const earliest = new Date(now.getTime() + minAdvanceHours * 3_600_000);
+
+    const available = slots
+      .map((s: any) => {
+        const [h, m] = String(s.startTime || "0:0").split(":").map(Number);
+        const slotStart = new Date(startOfTarget);
+        slotStart.setHours(h || 0, m || 0, 0, 0);
+        return { ...s, slotStart };
+      })
+      .filter((s: any) => s.slotStart >= earliest)
+      .map(({ slotStart, ...s }: any) => ({
+        ...s,
+        // Absolute instant for this slot on the requested date, so the client
+        // doesn't have to reassemble it from a "HH:mm" string.
+        scheduledAt: slotStart.toISOString(),
+      }));
 
     res.json({
       success: true,
-      data: slots,
+      data: available,
     });
   } catch (error: any) {
     res.status(500).json({

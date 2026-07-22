@@ -62,6 +62,12 @@ export const initSocket = async (httpServer: HttpServer): Promise<Server> => {
       if (decoded.driverId) {
         socket.userId = decoded.driverId;
         socket.userType = "DRIVER";
+      } else if (decoded.adminId) {
+        // Admin tokens are signed as { adminId }. Without this branch an admin
+        // socket was typed USER, so it never joined the "admin" room that
+        // sos.service emits sos:new to — panic alerts reached nobody live.
+        socket.userId = decoded.adminId;
+        socket.userType = "ADMIN";
       } else {
         socket.userId = decoded._id || decoded.userId;
         socket.userType = decoded.userType || "USER";
@@ -79,6 +85,11 @@ export const initSocket = async (httpServer: HttpServer): Promise<Server> => {
     // Join user-specific room
     if (socket.userId) {
       socket.join(`user:${socket.userId}`);
+
+      // Admins listen for platform-wide alerts (sos:new is emitted to "admin").
+      if (socket.userType === "ADMIN") {
+        socket.join("admin");
+      }
 
       if (socket.userType === "DRIVER") {
         socket.join("drivers");
@@ -303,11 +314,29 @@ export const initSocket = async (httpServer: HttpServer): Promise<Server> => {
     socket.on("disconnect", async () => {
       console.log(`Socket disconnected: ${socket.userId}`);
 
-      // If driver, remove from online drivers
+      // If driver, remove from the dispatch geo-index — but ONLY once none of
+      // their sockets remain. The driver app holds several independent
+      // connections (dashboard, location, chat, support, trip screen), so
+      // unconditionally removing here meant simply closing a chat pulled an
+      // on-shift driver out of dispatch until their next location ping.
       if (socket.userType === "DRIVER" && socket.userId) {
         try {
+          const remaining = await io!.in(`user:${socket.userId}`).fetchSockets();
+          if (remaining.length > 0) return; // other sockets still live — stay online
+
           const redis = getRedisClient();
           await redis.zRem("driver:locations", socket.userId);
+
+          // Mark them offline too. Dropping the geo entry without this left
+          // Driver.isOnline stuck at true: the app kept showing "Online" while
+          // dispatch could no longer see them, so the driver sat waiting for
+          // requests that could never arrive. A backend restart or a network
+          // blip put every on-shift driver into that state silently.
+          const DriverModel = (await import("../models/driver.model")).default;
+          await DriverModel.updateOne(
+            { _id: socket.userId },
+            { $set: { isOnline: false } },
+          );
         } catch (error) {
           console.error("Error removing driver on disconnect:", error);
         }

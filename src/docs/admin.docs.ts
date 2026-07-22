@@ -656,7 +656,7 @@
  *           schema:
  *             type: object
  *             properties:
- *               platformFeePercentage:
+ *               driverCommissionPercent:
  *                 type: number
  *               gstPercentage:
  *                 type: number

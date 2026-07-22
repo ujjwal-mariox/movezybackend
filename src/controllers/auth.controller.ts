@@ -2,9 +2,22 @@ import { Request, Response, NextFunction } from "express";
 import { v4 as uuidv4 } from "uuid";
 
 import * as UserService from "../services/user.service";
+import * as SmsService from "../services/sms.service";
 import helpers from "../utils/helpers";
 import redis from "../utils/redis";
 import config from "../config";
+
+/**
+ * Deliver a login OTP by SMS. Fire-and-forget: never block or fail the login
+ * response on an SMS provider hiccup — the OTP is already stored in Redis.
+ * When Twilio is unconfigured this is a logged no-op (dev uses the master OTP).
+ */
+const sendOtpSms = (mobileNumber: string, otp: string): void => {
+  SmsService.sendSms(
+    mobileNumber,
+    `${otp} is your Movezy verification code. It is valid for a few minutes. Do not share it with anyone.`,
+  ).catch(() => null);
+};
 
 export const login = async (
   req: Request,
@@ -12,7 +25,10 @@ export const login = async (
   next: NextFunction
 ) => {
 
-  const { mobileNumber } = req.body;
+  // The WhatsApp-updates checkbox lives on the login screen, but the account is
+  // only created once the OTP is verified — so the consent travels with the OTP
+  // transaction. It used to live in widget state and was simply discarded.
+  const { mobileNumber, whatsappOptIn } = req.body;
 
   const otp = helpers().generateOTP();
   const mobileQuery = { mobileNumber };
@@ -37,6 +53,7 @@ export const login = async (
     txnId: newTxnId,
     mobileNumber,
     otp,
+    whatsappOptIn: Boolean(whatsappOptIn),
     reason: "OTP LOGIN LINK APP",
     is_active: 1,
     date_created: new Date(),
@@ -45,6 +62,8 @@ export const login = async (
 
   await UserService.setUserInRedisByTxnId(otpData);
   await UserService.setUserInRedisForReg(mobileNumber, otpData);
+
+  sendOtpSms(mobileNumber, otp);
 
   req.rData = {
     userRegister: !!user,
@@ -112,12 +131,17 @@ export const verifyOtp = async (
   // 4️⃣ User handling
   let user = await UserService.fetchByQuery({ mobileNumber });
 
+  // Record the WhatsApp consent captured on the login screen. Both the opt-in
+  // and the opt-out matter, so this is written on every sign-in rather than
+  // only when it is true.
+  const whatsappOptIn = Boolean(otpData.whatsappOptIn);
+
   if (!user) {
-    user = await UserService.addUsers({ mobileNumber });
+    user = await UserService.addUsers({ mobileNumber, whatsappOptIn });
   }
 
   const token = helpers().createJWT({ userId: user._id });
-  await UserService.updateUsers(user._id, { token });
+  await UserService.updateUsers(user._id, { token, whatsappOptIn });
 
   req.rData = { token, userId: user._id };
   req.msg = "otp_verified";
@@ -150,6 +174,8 @@ export const resendOtp = async (
 
   await UserService.setUserInRedisByTxnId(otpData);
   await UserService.setUserInRedisForReg(mobileNumber, otpData);
+
+  sendOtpSms(mobileNumber, otp);
 
   req.rData = {
     userRegister: !!user,

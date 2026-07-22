@@ -5,6 +5,22 @@ export interface IVehicleType {
 
   name: string;
   description?: string;
+
+  /**
+   * Which broad category this type belongs to ("2W" | "3W" | "4W" | "HV").
+   * Nothing linked a VehicleType to a category before, so the only way to map a
+   * vehicle's coarse "2W" to a bookable type was to guess from its name — and
+   * "2 Wheeler" and "Scooter" are both 2W, so it was a coin-flip.
+   */
+  categoryCode?: string;
+
+  /**
+   * The type to use when all that is known is the category. Exactly one type per
+   * category should carry this, which is what makes a category-only vehicle
+   * resolvable without guessing.
+   */
+  isDefaultForCategory?: boolean;
+
   maxWeightKg: number;
 
   // Cargo area dimensions (feet)

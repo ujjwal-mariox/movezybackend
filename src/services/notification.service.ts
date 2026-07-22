@@ -7,6 +7,8 @@ import {
 } from "../models/notification.model";
 import User from "../models/Users";
 import Driver from "../models/driver.model";
+import Booking from "../models/booking.model";
+import * as SmsService from "./sms.service";
 import { cache } from "../utils/redis.util";
 import config from "../config";
 import {
@@ -501,9 +503,15 @@ export const sendBookingStatusNotification = async (
       title: "Driver Arrived",
       body: "Your driver has arrived at the pickup location.",
     },
-    PICKED_UP: {
+    // Key must match the Booking status enum ("PICKED"); the old "PICKED_UP"
+    // matched nothing and made this a silent no-op.
+    PICKED: {
       title: "Goods Picked Up",
       body: "Your goods have been picked up and are on the way.",
+    },
+    IN_PROGRESS: {
+      title: "On the Way",
+      body: "Your delivery is on the way to the drop location.",
     },
     COMPLETED: {
       title: "Delivery Completed",
@@ -692,6 +700,13 @@ export const sendBroadcast = async (params: {
   templateId?: Types.ObjectId;
   data?: Record<string, any>;
   createdBy?: Types.ObjectId;
+  /** When set, restrict the DRIVERS audience to exactly these drivers.
+   *  The compliance page's "notify selected" always passed ids in `data`,
+   *  and this function ignored them — spamming the whole fleet while the UI
+   *  claimed a targeted send. */
+  driverIds?: string[];
+  /** Same, for the USERS audience. */
+  userIds?: string[];
 }) => {
   const campaign = await NotificationCampaign.create({
     title: params.title,
@@ -709,7 +724,11 @@ export const sendBroadcast = async (params: {
   let targeted = 0;
 
   if (params.audience === "USERS" || params.audience === "ALL") {
-    const users = await User.find({ isActive: true }).select(
+    const userFilter: Record<string, any> = { isActive: true };
+    if (params.userIds?.length) {
+      userFilter._id = { $in: params.userIds };
+    }
+    const users = await User.find(userFilter).select(
       "_id fcmToken isNotificationEnabled",
     );
     const list = users.filter((u: any) => u.isNotificationEnabled !== false);
@@ -735,7 +754,11 @@ export const sendBroadcast = async (params: {
   }
 
   if (params.audience === "DRIVERS" || params.audience === "ALL") {
-    const drivers = await Driver.find({ isActive: true }).select(
+    const driverFilter: Record<string, any> = { isActive: true };
+    if (params.driverIds?.length) {
+      driverFilter._id = { $in: params.driverIds };
+    }
+    const drivers = await Driver.find(driverFilter).select(
       "_id fcmToken isNotificationEnabled",
     );
     const list = drivers.filter((d: any) => d.isNotificationEnabled !== false);
@@ -828,4 +851,39 @@ export const getNotificationAnalytics = async () => {
     byType,
     recentCampaigns,
   };
+};
+
+/**
+ * Tell the consignee (the person receiving the parcel) that it is on its way.
+ *
+ * The consignee is NOT an app user — they have no account and no FCM token — so
+ * SMS is the only channel that can reach them. Sent once, on pickup.
+ *
+ * Returns true only if the SMS was actually delivered. Never throws: this is a
+ * side-channel to the driver completing pickup and must not fail that.
+ */
+export const notifyConsigneePickup = async (booking: any): Promise<boolean> => {
+  const phone = booking?.receiverPhone;
+  if (!phone) return false;
+
+  // Guard against a retried pickup re-sending the same SMS.
+  if (booking.consigneeNotifiedAt) return false;
+
+  const name = booking.receiverName ? `Hi ${booking.receiverName}, ` : "";
+  const ref = booking.bookingNumber ? ` (${booking.bookingNumber})` : "";
+  const dropTo = booking.drop?.address ? ` to ${booking.drop.address}` : "";
+  const message =
+    `${name}your parcel${ref} has been picked up and is on its way${dropTo}. ` +
+    `Track it in the Movezy app. - Movezy`;
+
+  const sent = await SmsService.sendSms(phone, message).catch(() => false);
+
+  if (sent) {
+    // Stamp only on real delivery, so a failed send retries on a later event
+    // rather than being silently marked done.
+    await Booking.findByIdAndUpdate(booking._id, {
+      consigneeNotifiedAt: new Date(),
+    }).catch(() => null);
+  }
+  return sent;
 };

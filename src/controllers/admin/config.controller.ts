@@ -66,7 +66,6 @@ export const getFareConfig = async (req: Request, res: Response) => {
     config = await FareConfig.create({
       name: "default",
       gstPercentage: 5,
-      platformFeePercentage: 10,
       minimumFare: 50,
     });
   }
@@ -205,7 +204,7 @@ export const deleteVehicleType = async (req: Request, res: Response) => {
   const vehicleType = await VehicleType.findByIdAndUpdate(
     id,
     { isDeleted: true, isActive: false },
-    { new: true },
+    { new: true, runValidators: true },
   );
 
   if (!vehicleType) {
@@ -230,7 +229,7 @@ export const restoreVehicleType = async (req: Request, res: Response) => {
   const vehicleType = await VehicleType.findByIdAndUpdate(
     id,
     { isDeleted: false },
-    { new: true },
+    { new: true, runValidators: true },
   );
 
   if (!vehicleType) {
@@ -420,7 +419,7 @@ export const updateCancellationReason = async (req: Request, res: Response) => {
     updateData.code = updateData.code.toUpperCase();
   }
 
-  const reason = await CancellationReason.findByIdAndUpdate(id, updateData, { new: true });
+  const reason = await CancellationReason.findByIdAndUpdate(id, updateData, { new: true, runValidators: true });
   if (!reason) {
     res.status(404);
     throw new Error("Cancellation reason not found");
@@ -444,7 +443,7 @@ export const deleteCancellationReason = async (req: Request, res: Response) => {
   const reason = await CancellationReason.findByIdAndUpdate(
     id,
     { isActive: false },
-    { new: true },
+    { new: true, runValidators: true },
   );
   if (!reason) {
     res.status(404);
@@ -544,7 +543,7 @@ export const createGoodsType = async (req: Request, res: Response) => {
  */
 export const updateGoodsType = async (req: Request, res: Response) => {
   const { id } = req.params;
-  const goodsType = await GoodsType.findByIdAndUpdate(id, req.body, { new: true })
+  const goodsType = await GoodsType.findByIdAndUpdate(id, req.body, { new: true, runValidators: true })
     .populate("allowedVehicleTypes", "name image icon");
 
   if (!goodsType) {
@@ -574,7 +573,7 @@ export const toggleGoodsType = async (req: Request, res: Response) => {
  */
 export const deleteGoodsType = async (req: Request, res: Response) => {
   const { id } = req.params;
-  const goodsType = await GoodsType.findByIdAndUpdate(id, { isDeleted: true, isActive: false }, { new: true });
+  const goodsType = await GoodsType.findByIdAndUpdate(id, { isDeleted: true, isActive: false }, { new: true, runValidators: true });
   if (!goodsType) {
     return res.status(404).json({ success: false, message: "Category not found" });
   }
@@ -633,7 +632,7 @@ export const updateAppSetting = async (req: Request, res: Response) => {
   const setting = await AppConfig.findOneAndUpdate(
     { key },
     { value },
-    { new: true },
+    { new: true, runValidators: true },
   );
 
   if (!setting) {
@@ -699,7 +698,7 @@ export const upsertServiceArea = async (req: Request, res: Response) => {
 
   let area;
   if (id) {
-    area = await ServiceArea.findByIdAndUpdate(id, data, { new: true });
+    area = await ServiceArea.findByIdAndUpdate(id, data, { new: true, runValidators: true });
   } else {
     area = await ServiceArea.create(data);
   }
@@ -774,7 +773,7 @@ export const updateProhibitedItem = async (req: Request, res: Response) => {
   const { id } = req.params;
   const updateData = req.body;
 
-  const item = await ProhibitedItem.findByIdAndUpdate(id, updateData, { new: true });
+  const item = await ProhibitedItem.findByIdAndUpdate(id, updateData, { new: true, runValidators: true });
   if (!item) {
     res.status(404);
     throw new Error("Prohibited item not found");
@@ -797,7 +796,7 @@ export const deleteProhibitedItem = async (req: Request, res: Response) => {
   const item = await ProhibitedItem.findByIdAndUpdate(
     id,
     { isActive: false },
-    { new: true },
+    { new: true, runValidators: true },
   );
   if (!item) {
     res.status(404);
@@ -852,14 +851,14 @@ export const createCity = async (req: Request, res: Response) => {
 
 export const updateCity = async (req: Request, res: Response) => {
   const { id } = req.params;
-  const city = await City.findByIdAndUpdate(id, req.body, { new: true });
+  const city = await City.findByIdAndUpdate(id, req.body, { new: true, runValidators: true });
   if (!city) { res.status(404); throw new Error("City not found"); }
   res.locals.data = { message: "City updated", city };
 };
 
 export const deleteCity = async (req: Request, res: Response) => {
   const { id } = req.params;
-  const city = await City.findByIdAndUpdate(id, { isActive: false }, { new: true });
+  const city = await City.findByIdAndUpdate(id, { isActive: false }, { new: true, runValidators: true });
   if (!city) { res.status(404); throw new Error("City not found"); }
   res.locals.data = { message: "City deleted", city };
 };
@@ -899,14 +898,14 @@ export const createBodyType = async (req: Request, res: Response) => {
 
 export const updateBodyType = async (req: Request, res: Response) => {
   const { id } = req.params;
-  const bodyType = await BodyType.findByIdAndUpdate(id, req.body, { new: true });
+  const bodyType = await BodyType.findByIdAndUpdate(id, req.body, { new: true, runValidators: true });
   if (!bodyType) { res.status(404); throw new Error("Body type not found"); }
   res.locals.data = { message: "Body type updated", bodyType };
 };
 
 export const deleteBodyType = async (req: Request, res: Response) => {
   const { id } = req.params;
-  const bodyType = await BodyType.findByIdAndUpdate(id, { isActive: false }, { new: true });
+  const bodyType = await BodyType.findByIdAndUpdate(id, { isActive: false }, { new: true, runValidators: true });
   if (!bodyType) { res.status(404); throw new Error("Body type not found"); }
   res.locals.data = { message: "Body type deleted", bodyType };
 };
@@ -946,14 +945,14 @@ export const createFuelType = async (req: Request, res: Response) => {
 
 export const updateFuelType = async (req: Request, res: Response) => {
   const { id } = req.params;
-  const fuelType = await FuelType.findByIdAndUpdate(id, req.body, { new: true });
+  const fuelType = await FuelType.findByIdAndUpdate(id, req.body, { new: true, runValidators: true });
   if (!fuelType) { res.status(404); throw new Error("Fuel type not found"); }
   res.locals.data = { message: "Fuel type updated", fuelType };
 };
 
 export const deleteFuelType = async (req: Request, res: Response) => {
   const { id } = req.params;
-  const fuelType = await FuelType.findByIdAndUpdate(id, { isActive: false }, { new: true });
+  const fuelType = await FuelType.findByIdAndUpdate(id, { isActive: false }, { new: true, runValidators: true });
   if (!fuelType) { res.status(404); throw new Error("Fuel type not found"); }
   res.locals.data = { message: "Fuel type deleted", fuelType };
 };
@@ -965,11 +964,16 @@ export const deleteFuelType = async (req: Request, res: Response) => {
  * Used by the driver / user app on the vehicle-details screen.
  */
 export const getAllMasterData = async (_req: Request, res: Response) => {
-  const [cities, bodyTypes, fuelTypes] = await Promise.all([
+  const [cities, bodyTypes, fuelTypes, vehicleTypes] = await Promise.all([
     City.find({ isActive: true }).sort({ sortOrder: 1, name: 1 }).select("name state"),
     BodyType.find({ isActive: true }).sort({ sortOrder: 1, name: 1 }).select("name"),
     FuelType.find({ isActive: true }).sort({ sortOrder: 1, name: 1 }).select("name"),
+    // Admin-managed vehicle catalog for the Add Vehicle dropdown. `_id` is the
+    // vehicleTypeId dispatch matches on, so the app must submit it (not a name).
+    VehicleType.find({ isActive: true, isDeleted: false })
+      .sort({ sortOrder: 1, name: 1 })
+      .select("name icon image"),
   ]);
 
-  res.locals.data = { cities, bodyTypes, fuelTypes };
+  res.locals.data = { cities, bodyTypes, fuelTypes, vehicleTypes };
 };

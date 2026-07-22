@@ -235,23 +235,67 @@ export const verifyBookingPayment = async (
       };
     }
 
-    // Update booking payment status
-    const booking = await Booking.findByIdAndUpdate(
-      bookingId,
-      {
-        paymentStatus: "PAID",
-        paymentTransactionId: paymentId,
-        paidAt: new Date(),
-      },
-      { new: true },
-    );
-
+    const booking = await Booking.findById(bookingId);
     if (!booking) {
       return {
         success: false,
         message: "Booking not found",
       };
     }
+
+    if (booking.paymentStatus === "PAID") {
+      // Idempotent: a retried verify shouldn't error or re-stamp.
+      return {
+        success: true,
+        message: "Payment already verified",
+        paymentId,
+        orderId,
+      };
+    }
+
+    // A valid signature only proves "this payment belongs to this order" — NOT
+    // that the order belongs to THIS booking, nor that the right amount was
+    // paid. Without these checks a cheap paid order's (orderId,paymentId,
+    // signature) could be replayed against an expensive booking to mark it PAID.
+    if (razorpayInstance) {
+      // createBookingPaymentOrder stored the order id here.
+      if (booking.paymentTransactionId !== orderId) {
+        return {
+          success: false,
+          message: "This payment does not belong to this booking",
+        };
+      }
+
+      const order = await razorpayInstance.orders.fetch(orderId);
+      if (!order) {
+        return { success: false, message: "Payment order not found" };
+      }
+      // Cross-check the order's own record of which booking it was for.
+      const orderBookingId = (order.notes as any)?.bookingId;
+      if (orderBookingId && String(orderBookingId) !== String(bookingId)) {
+        return {
+          success: false,
+          message: "This payment does not belong to this booking",
+        };
+      }
+      // Amount must match the fare (paise). Guard against a stale order created
+      // before the fare changed (e.g. waiting charges added at pickup).
+      const expectedPaise = Math.round(booking.finalFare * 100);
+      if (Number(order.amount) !== expectedPaise) {
+        return {
+          success: false,
+          message: "Paid amount does not match the booking fare",
+        };
+      }
+      if (order.status === "created") {
+        return { success: false, message: "Payment not captured for this order" };
+      }
+    }
+
+    booking.paymentStatus = "PAID";
+    booking.paymentTransactionId = paymentId;
+    (booking as any).paidAt = new Date();
+    await booking.save();
 
     return {
       success: true,
@@ -387,6 +431,23 @@ export const verifyWalletRecharge = async (
       };
     }
 
+    // Credit the amount RAZORPAY actually captured, never the client's `amount`.
+    // The signature only binds orderId+paymentId, not the amount, so trusting
+    // req.body.amount let a ₹10 payment credit any sum. The order was created
+    // server-side, so its amount is authoritative (paise → rupees).
+    let creditAmount = amount;
+    if (razorpayInstance) {
+      const order = await razorpayInstance.orders.fetch(orderId);
+      if (!order || order.status === "created") {
+        // "created" = no successful payment captured against this order.
+        return {
+          success: false,
+          message: "Payment not captured for this order",
+        };
+      }
+      creditAmount = Number(order.amount) / 100;
+    }
+
     // Find or create wallet
     let wallet = await Wallet.findOne({ userId });
     if (!wallet) {
@@ -396,16 +457,16 @@ export const verifyWalletRecharge = async (
       });
     }
 
-    // Add amount to wallet
-    wallet.balance += amount;
+    const balanceBefore = wallet.balance;
+    wallet.balance += creditAmount;
     await wallet.save();
 
     // Create transaction record
     await WalletTransaction.create({
       userId,
       type: "CREDIT",
-      amount,
-      balanceBefore: wallet.balance - amount,
+      amount: creditAmount,
+      balanceBefore,
       balanceAfter: wallet.balance,
       description: "Wallet recharge",
       referenceId: paymentId,

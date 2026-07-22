@@ -19,6 +19,13 @@ export interface FareBreakdown {
   coinDiscount: number;
   totalDiscount: number;
   finalFare: number;
+  // The REAL free-waiting terms, so clients stop hardcoding them. The app was
+  // promising "Free 50 mins" on one line and "65 mins free" on the next (and
+  // "beyond 60 minutes" in the terms sheet) while this service actually bills
+  // after `freeWaitingMinutes` — a 5-6x over-promise the app had no way to know
+  // about, because these values were never returned.
+  freeWaitingMinutes: number;
+  waitingChargePerMin: number;
 }
 
 export interface FareCalculationInput {
@@ -28,7 +35,15 @@ export interface FareCalculationInput {
   isScheduled?: boolean;
   scheduledTime?: Date;
   serviceType?: "WITHIN_CITY" | "OUTSTATION";
-  addons?: { addonId: Types.ObjectId; price: number; quantity: number }[];
+  addons?: {
+    addonId: Types.ObjectId;
+    price: number;
+    quantity: number;
+    /** How to interpret `price`. Defaults to FIXED when the caller omits it. */
+    priceType?: "FIXED" | "PERCENTAGE" | "PER_FLOOR" | "PER_KG";
+    /** Floors to carry (PER_FLOOR) / weight in kg (PER_KG), when known. */
+    units?: number;
+  }[];
   loadingUnloadingCharge?: number;
   tollCharges?: number;
   promoDiscount?: number;
@@ -98,13 +113,35 @@ export const calculateFare = async (
   const surgeCharge =
     surgeMultiplier > 1 ? baseFareWithSurge * (surgeMultiplier - 1) : 0;
 
-  // Calculate addon charges
+  // Calculate addon charges.
+  //
+  // This used to be a flat `price * quantity` for every add-on, ignoring
+  // priceType entirely — so Insurance, seeded as 2% of order value, charged a
+  // flat ₹2 (₹2 instead of ₹20 on a ₹1,000 booking).
+  //
+  // PERCENTAGE is taken on the trip value (base + distance + time + surge) —
+  // i.e. what the delivery itself is worth, before other add-ons, stops, tolls
+  // or discounts. That keeps it independent of add-on ordering and stops two
+  // percentage add-ons from compounding each other.
+  const tripValue = baseFare + distanceCharge + timeCharge + surgeCharge;
+
   let addonCharges = 0;
   if (input.addons && input.addons.length > 0) {
-    addonCharges = input.addons.reduce(
-      (sum, addon) => sum + addon.price * addon.quantity,
-      0,
-    );
+    addonCharges = input.addons.reduce((sum, addon) => {
+      const qty = addon.quantity || 1;
+      switch (addon.priceType) {
+        case "PERCENTAGE":
+          return sum + (tripValue * addon.price) / 100;
+        case "PER_FLOOR":
+        case "PER_KG":
+          // `units` = floors / kg. Falls back to quantity until the app
+          // captures floor count (the design's floor picker isn't built yet).
+          return sum + addon.price * (addon.units ?? qty);
+        case "FIXED":
+        default:
+          return sum + addon.price * qty;
+      }
+    }, 0);
   }
 
   // Additional stop charges (₹30 per stop)
@@ -161,6 +198,10 @@ export const calculateFare = async (
     coinDiscount: Math.round(coinDiscount * 100) / 100,
     totalDiscount: Math.round(totalDiscount * 100) / 100,
     finalFare: Math.round(finalFare * 100) / 100,
+    // Same source of truth calculateWaitingCharges bills from, so what the
+    // customer is quoted is exactly what they'll be charged.
+    freeWaitingMinutes: fareConfig?.freeWaitingMinutes ?? 10,
+    waitingChargePerMin: fareConfig?.waitingChargePerMin ?? 2,
   };
 };
 

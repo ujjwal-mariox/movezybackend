@@ -147,9 +147,16 @@ export const forgotPassword = async (req: Request, res: Response) => {
     .update(resetToken)
     .digest("hex");
 
-  admin.resetPasswordToken = resetTokenHash;
-  admin.resetPasswordExpires = new Date(Date.now() + 3600000); // 1 hour
-  await admin.save();
+  // Targeted update, not admin.save(): a full-document save re-validates
+  // every path, and the seeded super admin (no roleId) fails that validation —
+  // which turned every forgot-password request into a 400.
+  await Admin.updateOne(
+    { _id: admin._id },
+    {
+      resetPasswordToken: resetTokenHash,
+      resetPasswordExpires: new Date(Date.now() + 3600000), // 1 hour
+    },
+  );
 
   // Send the reset email (logs the link in dev when SMTP is unconfigured;
   // sends for real once SMTP_* is set — never fakes delivery).
@@ -193,11 +200,14 @@ export const resetPassword = async (req: Request, res: Response) => {
   // Hash new password
   const hashedPassword = await bcrypt.hash(newPassword, 12);
 
-  admin.password = hashedPassword;
-  admin.resetPasswordToken = undefined;
-  admin.resetPasswordExpires = undefined;
-  admin.passwordChangedAt = new Date();
-  await admin.save();
+  // Targeted update for the same reason as forgotPassword above.
+  await Admin.updateOne(
+    { _id: admin._id },
+    {
+      $set: { password: hashedPassword, passwordChangedAt: new Date() },
+      $unset: { resetPasswordToken: 1, resetPasswordExpires: 1 },
+    },
+  );
 
   // Invalidate all sessions
   await AdminSession.updateMany({ adminId: admin._id }, { isActive: false });

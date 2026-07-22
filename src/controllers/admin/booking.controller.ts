@@ -222,9 +222,13 @@ export const processRefund = async (req: Request, res: Response) => {
     });
   }
 
-  // processRefund already set refundAmount/refundStatus; mark the payment as
-  // refunded for the admin-cancel flow.
-  booking.paymentStatus = "REFUNDED";
+  // processRefund already set refundAmount/refundStatus. A partial refund
+  // must not read as fully refunded — the Payments page sums these statuses.
+  const refundedSoFar = Number(booking.refundAmount || 0);
+  booking.paymentStatus =
+    refundedSoFar >= Number(booking.finalFare || 0)
+      ? "REFUNDED"
+      : "PARTIALLY_REFUNDED";
   await booking.save();
 
   // Propagate refund to user app

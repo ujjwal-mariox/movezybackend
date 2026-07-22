@@ -14,7 +14,8 @@ export interface IFareConfig {
   _id: Types.ObjectId;
   name: string;
   gstPercentage: number;
-  platformFeePercentage: number;
+  /** Share of the pre-GST subtotal Movezy retains from the driver's settlement. */
+  driverCommissionPercent: number;
   insuranceFee: number;
   minimumFare: number;
   waitingChargePerMin: number;
@@ -26,6 +27,17 @@ export interface IFareConfig {
   peakHourSurgeMultiplier: number;
   peakHourStart: number;
   peakHourEnd: number;
+  /**
+   * Refund ceiling by cancellation stage, as a percentage of the fare.
+   *
+   * Cancellation used to refund 100% at ANY stage — including PICKED and
+   * IN_PROGRESS, where the goods are already on the vehicle and the driver has
+   * done the work. A reason's own refundPercentage still applies, but it can
+   * no longer exceed the ceiling for the stage the trip reached.
+   */
+  refundBeforeAssignPercent: number;
+  refundAfterAssignPercent: number;
+  refundAfterPickupPercent: number;
   isActive: boolean;
 }
 
@@ -91,12 +103,15 @@ const FareConfigSchema = new Schema<IFareConfig>(
       min: 0,
       max: 100,
     },
-    platformFeePercentage: {
+    driverCommissionPercent: {
       type: Number,
-      default: 10,
+      default: 20,
       min: 0,
-      max: 50,
+      max: 100,
     },
+    // `platformFeePercentage` was removed here: it sat in config at 10 but no
+    // calculation anywhere read it, so it looked like a live setting and was
+    // not. Commission lives in `driverCommissionPercent` above.
     insuranceFee: {
       type: Number,
       default: 0,
@@ -107,6 +122,12 @@ const FareConfigSchema = new Schema<IFareConfig>(
       default: 50,
       min: 0,
     },
+    // Stage ceilings. Defaults are deliberately conservative and fully
+    // admin-editable: nothing is refunded once the goods are aboard, the
+    // customer keeps a full refund until a driver has been committed.
+    refundBeforeAssignPercent: { type: Number, default: 100, min: 0, max: 100 },
+    refundAfterAssignPercent: { type: Number, default: 100, min: 0, max: 100 },
+    refundAfterPickupPercent: { type: Number, default: 0, min: 0, max: 100 },
     waitingChargePerMin: {
       type: Number,
       default: 2,

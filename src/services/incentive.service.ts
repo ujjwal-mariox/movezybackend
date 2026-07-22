@@ -9,6 +9,7 @@
 import { Types } from "mongoose";
 import Booking from "../models/booking.model";
 import Driver from "../models/driver.model";
+import DriverIncentive from "../models/driver-incentive.model";
 
 const num = (v: string | undefined, d: number) => {
   const n = Number(v);
@@ -72,6 +73,124 @@ const makeTracker = (
   };
 };
 
+/** "2026-07-17" — the window a daily/peak bonus belongs to. */
+const dayKey = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate(),
+  ).padStart(2, "0")}`;
+
+/** "2026-W29" — the window a weekly bonus belongs to (Monday-based). */
+const weekKey = (d: Date) => {
+  const monday = startOfWeek();
+  const jan1 = new Date(monday.getFullYear(), 0, 1);
+  const week = Math.floor(
+    (monday.getTime() - jan1.getTime()) / (7 * 24 * 60 * 60 * 1000),
+  ) + 1;
+  return `${monday.getFullYear()}-W${String(week).padStart(2, "0")}`;
+};
+
+/**
+ * Persist any bonus the driver has now earned.
+ *
+ * Called after each completed trip. Relies on the unique
+ * (driverId, type, periodKey) index for idempotency rather than a
+ * read-then-write check — two trips completing at once would both pass a
+ * "has it been awarded?" read and pay the bonus twice.
+ */
+export const awardEarnedIncentives = async (driverIdStr: string) => {
+  const driverId = new Types.ObjectId(driverIdStr);
+  const now = new Date();
+  const todayStart = startOfToday();
+  const weekStart = startOfWeek();
+
+  const [todayCompleted, weekCompleted] = await Promise.all([
+    Booking.find({
+      driverId,
+      status: "COMPLETED",
+      completedAt: { $gte: todayStart },
+    })
+      .select("completedAt")
+      .lean(),
+    Booking.countDocuments({
+      driverId,
+      status: "COMPLETED",
+      completedAt: { $gte: weekStart },
+    }),
+  ]);
+
+  const peakTripsToday = todayCompleted.filter((b: any) =>
+    b.completedAt ? isPeakHour(new Date(b.completedAt)) : false,
+  ).length;
+
+  const candidates = [
+    {
+      type: "daily" as const,
+      title: "Daily Target",
+      current: todayCompleted.length,
+      target: DAILY_TARGET,
+      amount: DAILY_REWARD,
+      periodKey: dayKey(now),
+    },
+    {
+      type: "weekly" as const,
+      title: "Weekly Milestone",
+      current: weekCompleted,
+      target: WEEKLY_TARGET,
+      amount: WEEKLY_REWARD,
+      periodKey: weekKey(now),
+    },
+    {
+      type: "peak" as const,
+      title: "Peak Hour Bonus",
+      current: peakTripsToday,
+      target: PEAK_TARGET,
+      amount: PEAK_REWARD,
+      periodKey: dayKey(now),
+    },
+  ].filter((c) => c.current >= c.target);
+
+  for (const c of candidates) {
+    try {
+      await DriverIncentive.updateOne(
+        { driverId, type: c.type, periodKey: c.periodKey },
+        {
+          $setOnInsert: {
+            driverId,
+            type: c.type,
+            periodKey: c.periodKey,
+            title: c.title,
+            amount: c.amount,
+            progressAtAward: c.current,
+            target: c.target,
+            awardedAt: now,
+          },
+        },
+        { upsert: true },
+      );
+    } catch (e: any) {
+      // Duplicate key = another concurrent trip already awarded this window.
+      // That is the index doing its job, not a failure.
+      if (e?.code !== 11000) throw e;
+    }
+  }
+};
+
+/** Bonuses actually awarded to this driver, newest first. */
+export const getDriverIncentiveHistory = async (driverIdStr: string) => {
+  return DriverIncentive.find({ driverId: new Types.ObjectId(driverIdStr) })
+    .sort({ awardedAt: -1 })
+    .lean();
+};
+
+/** Total bonus money this driver is owed. Included in their payout balance. */
+export const getAwardedIncentiveTotal = async (driverId: Types.ObjectId) => {
+  const agg = await DriverIncentive.aggregate([
+    { $match: { driverId } },
+    { $group: { _id: null, total: { $sum: "$amount" } } },
+  ]);
+  return agg[0]?.total ?? 0;
+};
+
 /**
  * Compute the full incentive summary for a driver from real booking data.
  */
@@ -86,7 +205,7 @@ export const getDriverIncentiveSummary = async (driverIdStr: string) => {
       status: "COMPLETED",
       completedAt: { $gte: todayStart },
     })
-      .select("finalFare fare completedAt")
+      .select("driverEarnings finalFare fare completedAt")
       .lean(),
     Booking.countDocuments({
       driverId,
@@ -97,8 +216,12 @@ export const getDriverIncentiveSummary = async (driverIdStr: string) => {
   ]);
 
   const todayTrips = todayCompleted.length;
+  // What the driver actually earned, not what the customer paid. Summing
+  // finalFare here showed the gross — GST and commission included — which is
+  // ~24% more than the driver can ever withdraw, so the dashboard headline
+  // would contradict the payout balance on the very next screen.
   const todayEarnings = todayCompleted.reduce(
-    (sum, b: any) => sum + (b.finalFare ?? b.fare ?? 0),
+    (sum, b: any) => sum + (b.driverEarnings ?? 0),
     0,
   );
   const peakTripsToday = todayCompleted.filter((b: any) =>
@@ -111,10 +234,11 @@ export const getDriverIncentiveSummary = async (driverIdStr: string) => {
     makeTracker("peak", "Peak Hour Bonus", peakTripsToday, PEAK_TARGET, PEAK_REWARD),
   ];
 
-  // Earned incentives = rewards of achieved trackers.
-  const incentivesEarned = trackers
-    .filter((t) => t.achieved)
-    .reduce((sum, t) => sum + t.reward, 0);
+  // Report what has actually been awarded and is owed, not a live sum of
+  // whichever trackers happen to read as achieved right now. The app puts this
+  // under "Total (Earnings + Bonus)" next to a wallet icon, so it has to be
+  // money the driver can really collect.
+  const incentivesEarned = await getAwardedIncentiveTotal(driverId);
 
   return {
     todayEarnings: Math.round(todayEarnings),

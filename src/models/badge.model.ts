@@ -34,12 +34,41 @@ const BadgeSchema = new Schema<IBadge>(
     },
     category: {
       type: String,
-      enum: ["onboarding", "milestones", "performance"],
+      // The five categories the My Badge design filters by: Onboarding &
+      // Training, Trip Milestones, Performance & Quality, Engagement &
+      // Community, Earnings & Growth. "engagement" and "earnings" were absent,
+      // so no badge in those tabs could ever exist.
+      enum: [
+        "onboarding",
+        "milestones",
+        "performance",
+        "engagement",
+        "earnings",
+      ],
       default: "milestones",
     },
     unlockType: {
       type: String,
-      enum: ["kyc_verified", "trips", "rating", "zero_cancellation", "manual"],
+      // Every type here is evaluated against REAL driver data in getBadges.
+      // "manual" is for badges only an admin can award (e.g. Community
+      // Helper) — they stay locked until awarded, never fake-unlocked.
+      enum: [
+        "kyc_verified",
+        "trips",
+        "rating",
+        "zero_cancellation",
+        "manual",
+        "training_completed",
+        "earnings",
+        "monthly_earnings",
+        "long_distance",
+        "consistency",
+        "on_time",
+        "peak_hours",
+        "safety",
+        "feedback",
+        "referrals",
+      ],
       default: "manual",
     },
     unlockValue: {

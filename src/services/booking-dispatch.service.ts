@@ -392,6 +392,17 @@ export const handleDriverAcceptance = async (
       }
     }
 
+    // Which vehicle is actually coming. `booking.vehicleNumber` exists in the
+    // schema but nothing ever wrote it, so the customer's trip screen showed a
+    // blank vehicle number — they had no way to identify the vehicle pulling
+    // up — and no completed trip could be attributed to a vehicle.
+    const assignedVehicle = await DriverVehicle.findOne({
+      driverId: new Types.ObjectId(driverId),
+      vehicleTypeId: booking.vehicleTypeId,
+      isActive: true,
+      isDeleted: { $ne: true },
+    }).select("registrationNumber");
+
     // Atomically assign the booking to this driver
     const updatedBooking = await Booking.findOneAndUpdate(
       {
@@ -404,6 +415,9 @@ export const handleDriverAcceptance = async (
           driverId: new Types.ObjectId(driverId),
           status: "ASSIGNED",
           assignedAt: new Date(),
+          ...(assignedVehicle?.registrationNumber
+            ? { vehicleNumber: assignedVehicle.registrationNumber }
+            : {}),
         },
       },
       { new: true },

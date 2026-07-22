@@ -1,6 +1,19 @@
 export type Lang = "en" | string;
 
 export type MessageKey =
+  // Booking / trip lifecycle
+  | "invalid_booking"
+  | "booking_not_found"
+  | "booking_fetched"
+  | "invalid_otp"
+  | "arrived_at_pickup"
+  | "trip_started"
+  | "trip_completed"
+  | "cash_collected"
+  | "not_a_cash_booking"
+  | "booking_accepted"
+  | "booking_rejected"
+  | "booking_cancelled"
   | "user_already_found"
   | "success"
   | "logout"
@@ -39,6 +52,7 @@ export type MessageKey =
   | "driver_offline"
   | "driver_not_approved"
   | "driver_suspended"
+  | "training_incomplete"
   | "photo_required"
   | "photo_updated"
   | "profile_fetched"
@@ -169,6 +183,9 @@ export default function messages(lang: Lang = "en"): MessageMap {
     driver_suspended: {
       en: "Your account is suspended. Please contact admin",
     },
+    training_incomplete: {
+      en: "Complete your required training before going online",
+    },
     photo_required: {
       en: "Photo is required",
     },
@@ -201,6 +218,49 @@ export default function messages(lang: Lang = "en"): MessageMap {
     },
     logout_success: {
       en: "Logout successful",
+    },
+
+    // ── Booking / trip lifecycle ──
+    // These keys were used by the driver + booking controllers but never defined
+    // here, so the response carried no message at all and every failure in the
+    // trip flow surfaced as a generic client-side fallback.
+    invalid_booking: {
+      en: "This booking is no longer available. It may have been cancelled or taken by another driver.",
+    },
+    booking_not_found: {
+      en: "Booking not found",
+    },
+    booking_fetched: {
+      en: "Booking details loaded",
+    },
+    invalid_otp: {
+      en: "Incorrect pickup OTP. Please ask the customer to read it out again.",
+    },
+    // NOTE: `otp_verified` is already defined above for the login flow and is
+    // reused by verifyPickupOtp — not redefined here.
+    arrived_at_pickup: {
+      en: "Marked as arrived at pickup",
+    },
+    trip_started: {
+      en: "Trip started",
+    },
+    trip_completed: {
+      en: "Trip completed",
+    },
+    cash_collected: {
+      en: "Cash collected",
+    },
+    not_a_cash_booking: {
+      en: "This booking was already paid online — do not collect cash.",
+    },
+    booking_accepted: {
+      en: "Booking accepted",
+    },
+    booking_rejected: {
+      en: "Booking declined",
+    },
+    booking_cancelled: {
+      en: "Booking cancelled",
     },
   };
 

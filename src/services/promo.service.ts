@@ -1,6 +1,6 @@
 import PromoCode, { IPromoCode } from "../models/promo-code.model";
 import PromoUsage from "../models/promo-usage.model";
-import { Types } from "mongoose";
+import { Types, ClientSession } from "mongoose";
 
 /**
  * Get all active promo codes
@@ -125,19 +125,25 @@ export const applyPromoCode = async (
   userId: Types.ObjectId,
   bookingId: Types.ObjectId,
   discountAmount: number,
+  session?: ClientSession,
 ) => {
-  // Record usage
-  await PromoUsage.create({
-    userId,
-    promoCodeId,
-    bookingId,
-    discountAmount,
-  });
+  // Record usage.
+  // Nothing called this until now, so PromoUsage was never written and
+  // PromoCode.usedCount never moved — which made *both* limit checks in
+  // validatePromoCode dead: `usedCount >= maxUsage` compared against a
+  // permanent 0, and the per-user countDocuments always returned 0. Every
+  // promo code was infinitely reusable by every user.
+  await PromoUsage.create(
+    [{ userId, promoCodeId, bookingId, discountAmount }],
+    session ? { session } : {},
+  );
 
   // Increment usage count
-  await PromoCode.findByIdAndUpdate(promoCodeId, {
-    $inc: { usedCount: 1 },
-  });
+  await PromoCode.findByIdAndUpdate(
+    promoCodeId,
+    { $inc: { usedCount: 1 } },
+    session ? { session } : {},
+  );
 };
 
 /**

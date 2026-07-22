@@ -14,6 +14,31 @@ export const sendBroadcast = async (req: Request, res: Response) => {
         message: "Title and body are required",
       });
     }
+
+    // No enterprise delivery channel exists. The old code created a campaign,
+    // reached nobody, and still marked it SENT — the UI reported success for
+    // a message no one received.
+    if (audience === "ENTERPRISES") {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Enterprise broadcast is not supported yet — no enterprise inbox or push channel exists.",
+      });
+    }
+
+    // Targeted sends: accept ids in the body, or in the legacy data.driverIds /
+    // data.userIds slots (string, comma-separated string, or array).
+    const parseIds = (v: any): string[] | undefined => {
+      if (!v) return undefined;
+      const arr = Array.isArray(v) ? v : String(v).split(",");
+      const clean = arr
+        .map((x: any) => String(x).trim())
+        .filter((x: string) => Types.ObjectId.isValid(x));
+      return clean.length ? clean : undefined;
+    };
+    const driverIds = parseIds(req.body.driverIds) ?? parseIds(data?.driverIds);
+    const userIds = parseIds(req.body.userIds) ?? parseIds(data?.userIds);
+
     const campaign = await NotificationService.sendBroadcast({
       title,
       body,
@@ -22,6 +47,8 @@ export const sendBroadcast = async (req: Request, res: Response) => {
       templateId: templateId ? new Types.ObjectId(templateId) : undefined,
       data,
       createdBy: req.adminId ? new Types.ObjectId(req.adminId) : undefined,
+      driverIds,
+      userIds,
     });
     res.json({
       success: true,

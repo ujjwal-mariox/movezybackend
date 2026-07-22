@@ -379,7 +379,10 @@ export const getDriverReports = async (req: Request, res: Response) => {
       $group: {
         _id: "$driverId",
         tripCount: { $sum: 1 },
-        totalEarnings: { $sum: "$finalFare" },
+        // Settlement figure with legacy fallback — not the customer's gross.
+          totalEarnings: {
+            $sum: { $ifNull: ["$driverEarnings", "$finalFare"] },
+          },
         avgRating: { $avg: "$rating" },
       },
     },

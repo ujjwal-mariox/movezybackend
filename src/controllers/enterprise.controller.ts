@@ -73,11 +73,12 @@ export const getEnterpriseContent = async (req: Request, res: Response) => {
             isActive: true,
           },
         ],
-        clients: [
-          { name: "Amazon", logoUrl: "amazon_logo", sortOrder: 0, isActive: true },
-          { name: "Samsung", logoUrl: "samsung_logo", sortOrder: 1, isActive: true },
-          { name: "ShopMart", logoUrl: "shop_mart_logo", sortOrder: 2, isActive: true },
-        ],
+        // Deliberately empty. This used to seed Amazon, Samsung and ShopMart as
+        // Movezy's enterprise clients and shipped them to every user who opened
+        // the page. They are not customers — presenting real companies' names
+        // and marks as references is false advertising, not placeholder copy.
+        // Real clients belong here only once someone can name them.
+        clients: [],
         ctaText: "Get in touch!",
         ctaSubtext: "All these features at No Additional Charges!",
         isActive: true,
@@ -102,7 +103,11 @@ export const getEnterpriseContent = async (req: Request, res: Response) => {
 export const submitEnterpriseInquiry = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user._id;
-    const { companyName, message, source } = req.body;
+    // The design's form lets the customer correct their name, mobile and email
+    // before sending — the contact on the account is often not the person who
+    // handles enterprise accounts. These were ignored and always overwritten
+    // with the user record, so an edited value was silently discarded.
+    const { companyName, name, phone, email, message, source } = req.body;
 
     // Get user details
     const user = await User.findById(userId);
@@ -113,13 +118,25 @@ export const submitEnterpriseInquiry = async (req: Request, res: Response) => {
       });
     }
 
+    const trimmed = (v: any) => (typeof v === "string" ? v.trim() : "");
+
+    // A lead with no company name is not a lead — every submission used to
+    // arrive with companyName: "" because nothing ever collected it.
+    if (!trimmed(companyName)) {
+      return res.status(400).json({
+        success: false,
+        message: "Company name is required",
+      });
+    }
+
     const inquiry = await EnterpriseInquiry.create({
       userId,
-      name: user.fullName || user.mobileNumber || "Unknown",
-      phone: user.mobileNumber || "",
-      email: user.email || "",
-      companyName: companyName || "",
-      message: message || "",
+      name:
+        trimmed(name) || user.fullName || user.mobileNumber || "Unknown",
+      phone: trimmed(phone) || user.mobileNumber || "",
+      email: trimmed(email) || user.email || "",
+      companyName: trimmed(companyName),
+      message: trimmed(message),
       source: source || "GET_IN_TOUCH",
       status: "NEW",
     });

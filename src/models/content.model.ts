@@ -20,6 +20,13 @@ export interface IFAQ {
   language: string;
   sortOrder: number;
   isActive: boolean;
+  /**
+   * Was this answer any use? The app has always shown 👍/👎 and thanked the
+   * customer for their feedback, but nothing recorded it anywhere — so the
+   * thanks was for nothing and no one could tell which answers were failing.
+   */
+  helpfulCount?: number;
+  notHelpfulCount?: number;
 }
 
 export interface ILanguage {
@@ -103,6 +110,9 @@ const FAQSchema = new Schema<IFAQ>(
       default: true,
       index: true,
     },
+    // See IFAQ: the 👍/👎 the app already shows had nowhere to go.
+    helpfulCount: { type: Number, default: 0 },
+    notHelpfulCount: { type: Number, default: 0 },
   },
   { timestamps: true },
 );

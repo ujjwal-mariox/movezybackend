@@ -17,6 +17,14 @@ export interface IAutomationRule {
     type: string;
     params?: Record<string, any>;
   };
+  /**
+   * Minimum gap before this rule may act on the SAME target again.
+   *
+   * Without it a standing condition ("driver idle > 7 min") re-fired on every
+   * sweep: one driver collected 116 identical nudges, over half of every
+   * notification in the system. 720 = at most twice a day per driver.
+   */
+  cooldownMinutes: number;
   lastTriggeredAt?: Date;
   triggerCount: number;
   createdBy?: Types.ObjectId;
@@ -73,6 +81,7 @@ const AutomationRuleSchema = new Schema<IAutomationRule>(
       },
       params: Schema.Types.Mixed,
     },
+    cooldownMinutes: { type: Number, default: 720 },
     lastTriggeredAt: Date,
     triggerCount: { type: Number, default: 0 },
     createdBy: { type: Schema.Types.ObjectId, ref: "Admin" },

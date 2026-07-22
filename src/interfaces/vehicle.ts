@@ -6,7 +6,14 @@ export interface IVehicle {
   driverId: Types.ObjectId;
 
   vehicleNumber: string;
+  /** Broad category: 2W / 3W / 4W. Not enough to dispatch with. */
   vehicleType: VehicleType;
+  /**
+   * The specific catalog VehicleType the driver registered ("Scooter" vs
+   * "2 Wheeler" — both are 2W). Dispatch matches on this, so without it an
+   * approved vehicle can never be sent a booking.
+   */
+  vehicleTypeId?: Types.ObjectId;
   vehicleBodyType?: string;
   fuelType?: "Petrol" | "Diesel" | "CNG" | "EV";
 

@@ -54,11 +54,14 @@ export const updateUserAddress = async (
 /**
  * Get address list
  */
-export const getUserAddress = async (query: any, page = 0, limit = 10) => {
+// `page` is 1-based, matching what the controller normalizes to and what
+// ADDRESS_API_IMPLEMENTATION.md documents. Treating it as 0-based here made
+// page=1 skip the first `limit` rows, so the saved-address list came back empty.
+export const getUserAddress = async (query: any, page = 1, limit = 10) => {
   return await UserAddress.find(query)
     .select("-__v")
     .sort({ _id: -1 })
-    .skip(page * limit)
+    .skip((Math.max(page, 1) - 1) * limit)
     .limit(limit);
 };
 

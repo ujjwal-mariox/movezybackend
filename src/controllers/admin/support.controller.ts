@@ -164,7 +164,11 @@ export const replyToTicket = async (req: Request, res: Response) => {
     });
   }
 
-  const replyChannel = channel || "CUSTOMER";
+  const driverId = (ticket as any).driverId?._id || (ticket as any).driverId;
+  // Default to the channel this ticket's thread actually lives on. Blindly
+  // defaulting to CUSTOMER stranded replies to driver tickets on a channel the
+  // driver's read path (which filters to DRIVER) never queries.
+  const replyChannel = channel || (driverId ? "DRIVER" : "CUSTOMER");
   const newMessage = await SupportService.addMessage({
     ticketId: ticket._id,
     senderId: new Types.ObjectId(req.adminId),
@@ -178,7 +182,6 @@ export const replyToTicket = async (req: Request, res: Response) => {
   // socket joins room `user:<driverId>` (driver token → socket.userId), so
   // emitToUser(driverId, ...) reaches them. Without this the reply was only
   // stored and the driver never saw it.
-  const driverId = (ticket as any).driverId?._id || (ticket as any).driverId;
   if (replyChannel === "DRIVER" && driverId) {
     emitToUser(String(driverId), "support:message", {
       ticketId: ticket.ticketId,

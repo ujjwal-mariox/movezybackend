@@ -63,7 +63,10 @@ const config = {
   coins: {
     earnRate: Number(process.env.COIN_EARN_RATE) || 2, // Coins per 100 rupees spent
     conversionRate: Number(process.env.COIN_CONVERSION_RATE) || 1, // 1 coin = 1 rupee
-    expiryDays: Number(process.env.COIN_EXPIRY_DAYS) || 365,
+    // 30, not 365: the only code that actually expires coins reads the
+    // COIN_EXPIRY_DAYS AppConfig row and falls back to 30 (coin.service.ts),
+    // so a 365 here was dead and contradicted real behaviour.
+    expiryDays: Number(process.env.COIN_EXPIRY_DAYS) || 30,
     minTransferToWallet: Number(process.env.COIN_MIN_WALLET_TRANSFER) || 100,
     minBankTransfer: Number(process.env.COIN_MIN_BANK_TRANSFER) || 500,
     maxDiscountPercent: Number(process.env.COIN_MAX_DISCOUNT_PERCENT) || 10,
@@ -87,6 +90,9 @@ const config = {
     twilioAccountSid: optional("TWILIO_ACCOUNT_SID"),
     twilioAuthToken: optional("TWILIO_AUTH_TOKEN"),
     twilioPhoneNumber: optional("TWILIO_PHONE_NUMBER"),
+    // Numbers are stored bare (no country code) across this codebase; used to
+    // build the E.164 form Twilio requires.
+    defaultCountryCode: optional("SMS_DEFAULT_COUNTRY_CODE", "+91"),
   },
 
   // Payment gateway

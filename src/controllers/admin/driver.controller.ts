@@ -66,11 +66,14 @@ export const getAllDrivers = async (req: Request, res: Response) => {
     search,
     dateFrom,
     dateTo,
+    deleted,
     page = 0,
     limit = 20,
   } = req.query;
 
-  const query: any = { isDeleted: false };
+  // deleted=true surfaces soft-deleted drivers so the Restore action is
+  // reachable — the hard isDeleted:false filter made restoring impossible.
+  const query: any = { isDeleted: deleted === "true" };
 
   if (status === "document_not_complete") {
     query.status = {
@@ -246,6 +249,107 @@ export const verifyDriver = async (req: Request, res: Response) => {
 
   await driver.save();
 
+  // Approving a driver has to approve their vehicles too.
+  //
+  // This handler only ever moved `driver.status`. The admin list *derives* each
+  // document's state from that (see statusFor() at the top of this file), so
+  // the panel showed "approved" — but nothing ever wrote
+  // Vehicle.verificationStatus, and the driver app's My Vehicles screen reads
+  // that raw field. So every vehicle sat at "pending" forever and the driver
+  // was told they were still under verification after being approved.
+  // One source of truth: write the real state.
+  try {
+    await Vehicle.updateMany(
+      { driverId: driver._id, isDeleted: { $ne: true } },
+      action === "approve"
+        ? {
+            $set: { verificationStatus: "approved" },
+            $unset: { rejectionReason: "" },
+          }
+        : {
+            $set: {
+              verificationStatus: "rejected",
+              rejectionReason:
+                rejectionReason || "Documents verification failed",
+            },
+          },
+    );
+  } catch (e) {
+    console.error("failed to propagate verification to vehicles", e);
+  }
+
+  // Make approved vehicles actually dispatchable.
+  //
+  // Dispatch matches drivers on DriverVehicle rows. Only the signup flow ever
+  // created one, so a vehicle added later through the app sat approved in the
+  // `vehicles` collection and was never sent a single booking — the two
+  // collections were never bridged. Approval is the right moment to bridge:
+  // a pending vehicle must not receive jobs.
+  try {
+    const driverVehicles = await Vehicle.find({
+      driverId: driver._id,
+      isDeleted: { $ne: true },
+    })
+      .select("vehicleNumber vehicleTypeId vehicleType")
+      .lean();
+
+    for (const v of driverVehicles as any[]) {
+      if (!v.vehicleNumber) continue;
+
+      // Prefer the exact type the driver registered. Older rows predate
+      // `vehicleTypeId` and only know a category ("2W"), so fall back to that
+      // category's designated default rather than stranding the vehicle
+      // un-dispatchable forever — which is what used to happen, silently.
+      let typeId = v.vehicleTypeId;
+      if (!typeId && v.vehicleType) {
+        const fallback = await VehicleType.findOne({
+          categoryCode: v.vehicleType,
+          isDefaultForCategory: true,
+          isActive: true,
+        }).select("_id");
+        typeId = fallback?._id;
+      }
+      if (!typeId) {
+        console.warn(
+          `[approve] vehicle ${v.vehicleNumber} has no catalog type and its category (${v.vehicleType}) has no default — it will not be dispatchable`,
+        );
+        continue;
+      }
+
+      await DriverVehicle.findOneAndUpdate(
+        { registrationNumber: String(v.vehicleNumber).toUpperCase() },
+        {
+          $set: {
+            driverId: driver._id,
+            vehicleTypeId: typeId,
+            // Rejecting must take the vehicle back out of dispatch.
+            isActive: action === "approve",
+            isDeleted: false,
+          },
+        },
+        { upsert: true, new: true },
+      );
+    }
+  } catch (e) {
+    console.error("failed to sync dispatch vehicles", e);
+  }
+
+  // ...and to their KYC record, for the same reason.
+  //
+  // The driver profile's "DL Verified" badge reads DriverKyc.isVerified. Nothing
+  // ever set it, so every one of the 37 KYC records sat at false and an approved
+  // driver was still told their licence was under review.
+  try {
+    await DriverKYC.updateOne(
+      { driverId: driver._id },
+      action === "approve"
+        ? { $set: { isVerified: true, verifiedAt: new Date() } }
+        : { $set: { isVerified: false }, $unset: { verifiedAt: "" } },
+    );
+  } catch (e) {
+    console.error("failed to propagate verification to KYC", e);
+  }
+
   // Propagate verification outcome to driver app
   try {
     const driverIdStr = String(driver._id);
@@ -274,6 +378,114 @@ export const verifyDriver = async (req: Request, res: Response) => {
 
   res.locals.data = {
     message: `Driver ${action === "approve" ? "approved" : "rejected"} successfully`,
+    driver,
+  };
+};
+
+/**
+ * Send a notification to ONE driver.
+ *
+ * Exists because the admin panel previously used /notifications/broadcast with
+ * `audience: "DRIVERS"` for per-driver messages: sendBroadcast ignores any id in
+ * `data` and targets every active driver, so a single re-upload request was
+ * delivered to the whole fleet. This targets exactly one driver.
+ */
+export const notifyDriver = async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { title, body } = req.body as { title?: string; body?: string };
+
+  if (!title || !body) {
+    return res.status(400).json({
+      success: false,
+      message: "title and body are required",
+    });
+  }
+
+  const driver = await Driver.findById(id).select("_id fullName");
+  if (!driver) {
+    return res.status(404).json({ success: false, message: "Driver not found" });
+  }
+
+  const sent = await notificationService
+    .sendToDriver(driver._id as Types.ObjectId, "SYSTEM", title, body)
+    .catch(() => false);
+
+  res.locals.data = {
+    message: `Notification sent to ${driver.fullName || "driver"}`,
+    // Push may be skipped when FCM is unconfigured; the in-app inbox row is
+    // still written by sendToDriver. Report it rather than implying delivery.
+    pushDelivered: Boolean(sent),
+  };
+};
+
+/**
+ * Block / unblock a driver.
+ *
+ * Deliberately reversible and distinct from reject: reject sends an onboarding
+ * driver back to re-upload documents, whereas this suspends an ALREADY-ACTIVE
+ * driver (e.g. expired documents) without touching their verification history.
+ * Forces them offline so the dispatcher stops considering them immediately.
+ */
+export const blockDriver = async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { action, reason } = req.body as {
+    action?: "block" | "unblock";
+    reason?: string;
+  };
+
+  if (action !== "block" && action !== "unblock") {
+    return res.status(400).json({
+      success: false,
+      message: "action must be 'block' or 'unblock'",
+    });
+  }
+
+  const driver = await Driver.findById(id);
+  if (!driver) {
+    return res.status(404).json({ success: false, message: "Driver not found" });
+  }
+
+  if (action === "block") {
+    driver.status = "suspended";
+    driver.isActive = false;
+    driver.isOnline = false; // stop dispatch reaching them right away
+    driver.suspensionReason = reason || "Blocked by admin";
+  } else {
+    // Restore to the working state. A blocked driver was necessarily verified
+    // before, so "approved" is the correct state to return them to.
+    driver.status = "approved";
+    driver.isActive = true;
+    driver.suspensionReason = undefined;
+  }
+
+  await driver.save();
+
+  // Tell the driver app, reusing the channel the verify flow already uses.
+  try {
+    emitToUser(String(driver._id), "driver:verification", {
+      status: driver.status,
+      isActive: driver.isActive,
+      suspensionReason: driver.suspensionReason,
+      updatedAt: new Date().toISOString(),
+    });
+
+    await notificationService
+      .sendToDriver(
+        driver._id as Types.ObjectId,
+        "SYSTEM",
+        action === "block" ? "Account Blocked" : "Account Restored",
+        action === "block"
+          ? `Your account has been blocked: ${driver.suspensionReason}`
+          : "Your account has been restored. You can accept bookings again.",
+        { status: driver.status, reason: driver.suspensionReason ?? "" },
+      )
+      .catch(() => null);
+  } catch (err) {
+    console.error("Driver block: propagation error", err);
+  }
+
+  res.locals.data = {
+    message: `Driver ${action === "block" ? "blocked" : "unblocked"} successfully`,
     driver,
   };
 };

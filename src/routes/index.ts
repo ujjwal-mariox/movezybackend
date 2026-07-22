@@ -68,6 +68,40 @@ router.use("/driver", driverAuthRoutes);
 // Driver App routes (authenticated driver features)
 router.use("/driver/app", driverRoutes);
 
+// Public legal/informational content (terms, privacy, about, refund,
+// cancellation) — read-only, no auth, edited from the admin CMS.
+import { getPublicContent } from "../controllers/admin/content.controller";
+import ErrorHandlerMiddleware from "../middlewares/error-handler.middleware";
+import ResponseMiddleware from "../middlewares/response.middleware";
+router.get(
+  "/content/:type",
+  ErrorHandlerMiddleware(getPublicContent),
+  ResponseMiddleware,
+);
+
+// Road routing for the maps in both apps. Open (same trust level as the OSM
+// tiles the apps already fetch) and cached server-side; returns null-ish 404
+// so callers fall back to a straight line rather than breaking the screen.
+import { getRoute } from "../services/routing.service";
+router.get(
+  "/routing/route",
+  ErrorHandlerMiddleware(async (req: any, res: any) => {
+    const fromLat = Number(req.query.fromLat);
+    const fromLng = Number(req.query.fromLng);
+    const toLat = Number(req.query.toLat);
+    const toLng = Number(req.query.toLng);
+
+    const route = await getRoute(fromLat, fromLng, toLat, toLng);
+    if (!route) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Route unavailable" });
+    }
+    res.locals.data = { route };
+  }),
+  ResponseMiddleware,
+);
+
 // Admin routes
 router.use("/admin", adminRoutes);
 

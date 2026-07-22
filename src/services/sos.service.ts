@@ -9,34 +9,23 @@ import Booking from "../models/booking.model";
 import Driver from "../models/driver.model";
 import User from "../models/Users";
 import * as NotificationService from "./notification.service";
+import * as SmsService from "./sms.service";
 import socketUtils from "../utils/socket.util";
 import { cache } from "../utils/redis.util";
 
 const MAX_EMERGENCY_CONTACTS = 5;
 
 /**
- * Send an SMS. THIS IS THE SINGLE INTEGRATION POINT for SMS across the SOS
- * flow (emergency contacts, police, location-share). A provider (Twilio /
- * MSG91 / etc.) has not been wired yet — when one is chosen, implement the
- * send here and everything else keeps working unchanged.
+ * Send an SMS for the SOS flow (emergency contacts, police, location-share).
  *
- * Returns true if the SMS was actually dispatched, false if SMS is not
- * configured (so callers can record delivery state honestly instead of
- * assuming success).
+ * Delegates to the shared SMS service (Twilio). Kept as a re-export so existing
+ * SOS callers are unchanged.
  *
- * ⚠️ SAFETY: until this is implemented, SOS contacts/police receive NO SMS.
+ * Still returns true only on actual dispatch, so callers record delivery state
+ * honestly. ⚠️ SAFETY: if Twilio credentials are absent this returns false and
+ * SOS contacts receive NOTHING — the credentials are what make SOS real.
  */
-export const sendSms = async (
-  toPhone: string,
-  message: string,
-): Promise<boolean> => {
-  // TODO(SMS): integrate a provider here, e.g.
-  //   await twilioClient.messages.create({ to: toPhone, from: SENDER, body: message })
-  // For now we only log; report `false` so we never claim a delivery that
-  // did not happen.
-  console.log(`[SMS NOT CONFIGURED] would send to ${toPhone}: ${message}`);
-  return false;
-};
+export const sendSms = SmsService.sendSms;
 
 /**
  * Add emergency contact

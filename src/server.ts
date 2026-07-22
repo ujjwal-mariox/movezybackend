@@ -18,6 +18,7 @@ import { startDelayDetection } from "./services/delay-detection.service";
 import { startAutomationEngine } from "./services/automation-engine.service";
 import { startReportScheduler } from "./services/scheduled-report.service";
 import { startOnboardingReminders } from "./services/onboarding-reminder.service";
+import { startScheduledDispatch } from "./services/scheduled-dispatch.service";
 import { rateLimiters } from "./middlewares/rate-limit.middleware";
 import {
   requestTimeout,
@@ -107,6 +108,15 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+/**
+ * Behind a reverse proxy (nginx on EC2, or an ALB), every request otherwise
+ * appears to come from 127.0.0.1 — so the IP-keyed rate limiters below would
+ * throttle ALL traffic as a single bucket and one person spamming OTP could
+ * lock out every user. `1` = trust exactly one proxy hop; raise it only if you
+ * add another layer (e.g. CloudFront in front of the ALB).
+ */
+app.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS) || 1);
 
 /**
  * CORS
@@ -199,7 +209,48 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
  */
 const PORT = config.server.port;
 
+/**
+ * Production preflight.
+ *
+ * These are configuration mistakes that are silent at boot but expensive in
+ * production, so fail loudly here rather than discovering them from a customer.
+ */
+const preflight = () => {
+  if (config.env !== "production") return;
+
+  const fatal: string[] = [];
+  const warn: string[] = [];
+
+  // A wildcard CORS origin with `credentials: true` lets any site call the API
+  // with a user's bearer token.
+  if (!process.env.CORS_ORIGIN || process.env.CORS_ORIGIN === "*") {
+    fatal.push("CORS_ORIGIN is unset or '*' — set it to your admin origin.");
+  }
+
+  // Fare distance depends on this. The public demo is fair-use only and will
+  // rate-limit production traffic, silently degrading quotes to straight-line.
+  if (!process.env.OSRM_URL) {
+    warn.push(
+      "OSRM_URL unset — using the public demo router (rate-limited). Self-host before real traffic.",
+    );
+  }
+
+  if (!process.env.RAZORPAY_KEY_ID || !process.env.PAYMENT_WEBHOOK_SECRET) {
+    warn.push("Razorpay key or webhook secret missing — payments will fail.");
+  }
+  if (!process.env.FIREBASE_PROJECT_ID) {
+    warn.push("Firebase unset — push notifications are skipped silently.");
+  }
+
+  warn.forEach((w) => console.warn(`⚠️  ${w}`));
+  if (fatal.length) {
+    fatal.forEach((f) => console.error(`❌ ${f}`));
+    throw new Error("Refusing to start with unsafe production config.");
+  }
+};
+
 (async () => {
+  preflight();
   await initializeConnections();
   httpServer.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
@@ -210,6 +261,7 @@ const PORT = config.server.port;
     startOnboardingReminders();
     startAutomationEngine();
     startReportScheduler();
+    startScheduledDispatch();
   });
 })();
 

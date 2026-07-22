@@ -192,6 +192,13 @@ driverRouter.post(
   ResponseMiddleware,
 );
 
+// Driver cancels an assigned booking (pre-pickup only) — returns it to search.
+driverRouter.post(
+  "/bookings/:bookingId/cancel",
+  ErrorHandlerMiddleware(DriverController.cancelBookingByDriver),
+  ResponseMiddleware,
+);
+
 // Verify pickup OTP and start trip
 driverRouter.post(
   "/bookings/:bookingId/verify-otp",
@@ -203,6 +210,13 @@ driverRouter.post(
 driverRouter.post(
   "/bookings/:bookingId/start",
   ErrorHandlerMiddleware(DriverController.startTrip),
+  ResponseMiddleware,
+);
+
+// Mark an intermediate stop delivered (multi-drop rides, in order)
+driverRouter.post(
+  "/bookings/:bookingId/stops/:stopIndex/complete",
+  ErrorHandlerMiddleware(DriverController.completeStop),
   ResponseMiddleware,
 );
 
@@ -322,6 +336,17 @@ driverRouter.get(
   ResponseMiddleware,
 );
 
+// Get training progress.
+// MUST stay above "/training/:moduleId" — Express matches in registration order,
+// so when this came after it, the request matched moduleId="progress" and
+// findById("progress") threw a CastError. The endpoint could never succeed and
+// the progress header always showed 0 of 0.
+driverRouter.get(
+  "/training/progress",
+  ErrorHandlerMiddleware(DriverController.getTrainingProgress),
+  ResponseMiddleware,
+);
+
 // Get training module details
 driverRouter.get(
   "/training/:moduleId",
@@ -333,13 +358,6 @@ driverRouter.get(
 driverRouter.post(
   "/training/:moduleId/lessons/:lessonId/complete",
   ErrorHandlerMiddleware(DriverController.completeTrainingLesson),
-  ResponseMiddleware,
-);
-
-// Get training progress
-driverRouter.get(
-  "/training/progress",
-  ErrorHandlerMiddleware(DriverController.getTrainingProgress),
   ResponseMiddleware,
 );
 
@@ -383,6 +401,23 @@ driverRouter.get(
 driverRouter.get(
   "/incentives/active",
   ErrorHandlerMiddleware(DriverController.getActiveIncentives),
+  ResponseMiddleware,
+);
+
+// Bonuses actually awarded to this driver. `/incentives` above is labelled
+// "history" but returns the live summary — there was no record of what had
+// been earned, because nothing was ever awarded.
+driverRouter.get(
+  "/incentives/history",
+  ErrorHandlerMiddleware(DriverController.getIncentiveHistory),
+  ResponseMiddleware,
+);
+
+// What customers said about this driver. The ratings existed on bookings all
+// along; nothing ever showed them back to the driver.
+driverRouter.get(
+  "/reviews",
+  ErrorHandlerMiddleware(DriverController.getDriverReviews),
   ResponseMiddleware,
 );
 
@@ -523,6 +558,15 @@ driverRouter.post(
 driverRouter.get(
   "/notifications",
   ErrorHandlerMiddleware(DriverController.getNotifications),
+  ResponseMiddleware,
+);
+
+// Mark every unread notification read. The controller has always handled the
+// no-id case, but only the `:notificationId` route existed — and Express does
+// not match an empty param, so "mark all" was unreachable over HTTP.
+driverRouter.post(
+  "/notifications/read-all",
+  ErrorHandlerMiddleware(DriverController.markNotificationRead),
   ResponseMiddleware,
 );
 

@@ -12,11 +12,14 @@ const ResponseMiddleware = (
   const data = req.rData ?? {};
   const code = req.rCode ?? 1;
 
-  const message = customMsg
-    ? customMsg
-    : req.msg
-    ? messages()[req.msg as MessageKey]
-    : "success";
+  // Fall back to req.msg itself when it isn't in the messages map. ~70 keys used
+  // by controllers were never added, and an unmapped key produced
+  // `message: undefined` — which JSON drops, so the response had NO message and
+  // every client toast degraded to its generic hardcoded fallback ("Could not
+  // accept booking" instead of "Booking already assigned to another driver").
+  // Controllers also set free-text sentences via req.msg; those now pass through.
+  const message =
+    customMsg || (req.msg && messages()[req.msg as MessageKey]) || req.msg || "success";
 
   switch (code) {
     case 3:

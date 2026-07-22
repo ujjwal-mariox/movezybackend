@@ -19,6 +19,15 @@ const VehicleSchema = new Schema<IVehicle>(
       type: String,
       enum: ["2W", "3W", "4W"],
     },
+    // The catalog type the driver actually registered. `vehicleType` above is
+    // only a category, and dispatch matches on a specific VehicleType id — so a
+    // vehicle without this can never receive a booking no matter how approved
+    // it is.
+    vehicleTypeId: {
+      type: Schema.Types.ObjectId,
+      ref: "VehicleType",
+      index: true,
+    },
 
     vehicleBodyType: String,
 

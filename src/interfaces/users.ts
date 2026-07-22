@@ -10,6 +10,8 @@ export interface IUser extends Document {
   dob: string;
   countryCode: string;
   mobileNumber: string;
+  /** Consent to booking updates over WhatsApp, captured on the login screen. */
+  whatsappOptIn?: boolean;
   isActive: boolean;
   isDeleted: boolean;
   isBlocked?: boolean;

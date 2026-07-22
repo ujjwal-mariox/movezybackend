@@ -5,7 +5,10 @@ import { Types } from "mongoose";
 import * as DriverService from "../services/driver.service";
 import * as DriverKycService from "../services/driver-kyc.service";
 import * as DriverVehicleService from "../services/driver-vehicle.service";
+import * as SmsService from "../services/sms.service";
 import VehicleModel from "../models/vehicle.model";
+import VehicleType from "../models/vehicle-type.model";
+import DriverVehicleModel from "../models/driver-vehicle.model";
 import helpers from "../utils/helpers";
 import redis from "../utils/redis";
 import config from "../config";
@@ -64,6 +67,13 @@ export const driverLogin = async (
     JSON.stringify(otpData),
     600,
   );
+
+  // Deliver the OTP by SMS. Fire-and-forget so an SMS outage never blocks login;
+  // no-op (logged) when Twilio is unconfigured — dev uses the master OTP.
+  SmsService.sendSms(
+    mobileNumber,
+    `${otp} is your Movezy driver verification code. Valid for a few minutes. Do not share it.`,
+  ).catch(() => null);
 
   req.rData = {
     driverRegistered: !!driver,
@@ -680,11 +690,84 @@ export const uploadRC = async (
 
     const vehicle = await new VehicleModel(vehicleData).save();
 
+    // Tie the vehicle to the admin catalog so dispatch can match it. Dispatch
+    // filters candidates via DriverVehicle.vehicleTypeId (findNearbyDrivers
+    // hard-skips drivers without a matching row); the legacy VehicleModel row
+    // above only stores a coarse "2W/3W/4W" string that dispatch never reads.
+    // Optional for backward compat with app builds that don't send it yet.
+    const rawVehicleTypeId = req.body.vehicleTypeId;
+    if (rawVehicleTypeId && Types.ObjectId.isValid(rawVehicleTypeId)) {
+      const catalogType = await VehicleType.findOne({
+        _id: rawVehicleTypeId,
+        isActive: true,
+        isDeleted: false,
+      }).select("_id");
+
+      if (catalogType) {
+        // Record the catalog type on the vehicle itself as well. It used to be
+        // used here and then thrown away, so the Vehicle row only remembered
+        // "2W"/"3W" — which meant nothing downstream (admin approval included)
+        // could ever rebuild the dispatch link if it went missing.
+        vehicle.vehicleTypeId = catalogType._id as Types.ObjectId;
+        await vehicle.save();
+
+        // Upsert keyed by registration number (unique, stored uppercase) so a
+        // re-submitted RC updates rather than violating the unique index.
+        await DriverVehicleModel.findOneAndUpdate(
+          { registrationNumber: String(req.body.vehicleNumber).toUpperCase() },
+          {
+            $set: {
+              driverId: new Types.ObjectId(driverId),
+              vehicleTypeId: catalogType._id,
+              isActive: true,
+              isDeleted: false,
+            },
+          },
+          { upsert: true, new: true },
+        );
+      }
+    } else {
+      // No catalog type = this vehicle can never be matched to a booking. It
+      // is accepted (older app builds don't send one) but it will sit approved
+      // and never ring, so make that visible instead of silent.
+      console.warn(
+        `[kyc/rc] vehicle ${req.body.vehicleNumber} registered without a vehicleTypeId — it will NOT be dispatchable until one is set`,
+      );
+    }
+
     // Check if driver already has license uploaded (for "add another vehicle" flow)
     const hasLicense = !!(kyc.drivingLicense?.frontImage);
 
     req.rData = { kyc, vehicleId: vehicle._id, hasLicense };
     req.msg = "rc_uploaded";
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Vehicle-type catalog for the driver app's Add Vehicle dropdown.
+ *
+ * The catalog is admin-managed (VehicleType collection); the app previously
+ * hardcoded '2/3/4 Wheeler', so admin changes never reached drivers and the
+ * selected type couldn't be tied to the vehicleTypeId dispatch matches on.
+ */
+export const getVehicleTypes = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  try {
+    const vehicleTypes = await VehicleType.find({
+      isActive: true,
+      isDeleted: false,
+    })
+      .select("name icon image sortOrder")
+      .sort({ sortOrder: 1, name: 1 });
+
+    req.rData = { vehicleTypes };
+    req.msg = "success";
     next();
   } catch (error) {
     next(error);

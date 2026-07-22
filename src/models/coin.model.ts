@@ -24,6 +24,9 @@ export interface ICoinTransaction {
   referenceType?: "Booking" | "User";
   description: string;
   expiryDate?: Date;
+  // Set once this EARNED lot has been run through expiry, so a re-run can never
+  // process it twice. Its absence is the "not yet expired" marker.
+  expiredAt?: Date;
   status: "PENDING" | "COMPLETED" | "FAILED";
 }
 
@@ -102,6 +105,10 @@ const CoinTransactionSchema = new Schema<ICoinTransaction>(
     expiryDate: {
       type: Date,
       index: true,
+    },
+    expiredAt: {
+      type: Date,
+      default: null,
     },
     status: {
       type: String,

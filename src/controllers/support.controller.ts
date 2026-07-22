@@ -128,7 +128,15 @@ export const getTicketById = async (req: Request, res: Response) => {
     // Get messages. NOTE: SupportMessage.senderId has no ref in the schema, so
     // populating it always returned null — clients render by senderType, so we
     // just return the raw messages.
-    const messages = await SupportMessage.find({ ticketId }).sort({
+    //
+    // MUST filter to the CUSTOMER channel. This fetched every message on the
+    // ticket, and admin messages DEFAULT to the INTERNAL channel (support
+    // service addMessage) — so private staff notes, and anything on the DRIVER
+    // channel, would have been served straight to the customer.
+    const messages = await SupportMessage.find({
+      ticketId,
+      channel: "CUSTOMER",
+    }).sort({
       createdAt: 1,
     });
 
@@ -174,6 +182,9 @@ export const addMessage = async (req: Request, res: Response) => {
       ticketId,
       senderId: userId,
       senderType: "USER",
+      // Explicit: a customer's reply always belongs on the CUSTOMER channel.
+      // (It matched the schema default, but the default is not the contract.)
+      channel: "CUSTOMER",
       message,
       messageType: messageType || "TEXT",
       attachments,
@@ -270,6 +281,53 @@ export const getFAQs = async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       message: error.message || "Failed to fetch FAQs",
+    });
+  }
+};
+
+/**
+ * Record whether an FAQ answer actually helped.
+ *
+ * The app has always shown 👍/👎 under each answer and replied "Thanks for your
+ * feedback!" — while posting nowhere at all. Now the vote is counted, so the
+ * thanks is true and you can see which answers are failing customers.
+ */
+export const rateFAQ = async (req: Request, res: Response) => {
+  try {
+    const { faqId } = req.params;
+    const { helpful } = req.body;
+
+    if (typeof helpful !== "boolean") {
+      return res.status(400).json({
+        success: false,
+        message: "`helpful` must be true or false",
+      });
+    }
+
+    const faq = await FAQ.findByIdAndUpdate(
+      faqId,
+      { $inc: helpful ? { helpfulCount: 1 } : { notHelpfulCount: 1 } },
+      { new: true },
+    ).select("helpfulCount notHelpfulCount");
+
+    if (!faq) {
+      return res.status(404).json({ success: false, message: "FAQ not found" });
+    }
+
+    // The list is cached for an hour; drop it so counts aren't served stale.
+    await cache.del("faqs:all").catch(() => {});
+
+    res.json({
+      success: true,
+      data: {
+        helpfulCount: (faq as any).helpfulCount ?? 0,
+        notHelpfulCount: (faq as any).notHelpfulCount ?? 0,
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to record feedback",
     });
   }
 };

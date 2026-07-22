@@ -73,14 +73,10 @@ export const getEnhancedOverview = async (req: Request, res: Response) => {
               grossRevenue: { $sum: { $ifNull: ["$finalFare", "$fare.totalFare"] } },
               totalOrders: { $sum: 1 },
               avgOrderValue: { $avg: { $ifNull: ["$finalFare", "$fare.totalFare"] } },
-              // No per-booking commission field exists; approximate as 20% of
-              // fare (matches finance.controller). The old $commission /
-              // $fare.commission paths don't exist → always summed to 0.
-              totalCommission: {
-                $sum: {
-                  $multiply: [{ $ifNull: ["$finalFare", 0] }, 0.2],
-                },
-              },
+              // Real commission, frozen on each booking at completion. This
+              // used to multiply gross by a hardcoded 0.2, so the dashboard
+              // reported a commission the platform was not actually taking.
+              totalCommission: { $sum: { $ifNull: ["$commissionAmount", 0] } },
               totalRefunds: { $sum: "$refundAmount" },
               refundCount: {
                 $sum: { $cond: [{ $eq: ["$refundStatus", "PROCESSED"] }, 1, 0] },
@@ -143,10 +139,8 @@ export const getEnhancedOverview = async (req: Request, res: Response) => {
               _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
               revenue: { $sum: { $ifNull: ["$finalFare", "$fare.totalFare"] } },
               orders: { $sum: 1 },
-              // Same 20% approximation as the summary — no commission field exists.
-              commission: {
-                $sum: { $multiply: [{ $ifNull: ["$finalFare", 0] }, 0.2] },
-              },
+              // Real per-booking commission, as in the summary above.
+              commission: { $sum: { $ifNull: ["$commissionAmount", 0] } },
               expenses: { $sum: 0 }, // Will be merged with expense data
             },
           },

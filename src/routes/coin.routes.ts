@@ -15,6 +15,9 @@ router.get("/balance", coinController.getCoinBalance);
 // Get coin transaction history
 router.get("/transactions", coinController.getCoinTransactions);
 
+// Coin economics (earn rate, conversion rates, expiry, minimums)
+router.get("/config", coinController.getCoinConfig);
+
 // Transfer coins to wallet
 router.post("/transfer-to-wallet", coinController.transferToWallet);
 

@@ -5,10 +5,12 @@ import * as UserController from "../controllers/admin/user.controller";
 import * as DriverController from "../controllers/admin/driver.controller";
 import * as PromoController from "../controllers/admin/promo.controller";
 import * as ConfigController from "../controllers/admin/config.controller";
+import * as ContentController from "../controllers/admin/content.controller";
 import * as SupportController from "../controllers/admin/support.controller";
 import * as ReportsController from "../controllers/admin/reports.controller";
 import * as ScheduledReportController from "../controllers/admin/scheduled-report.controller";
 import * as PayoutController from "../controllers/admin/payout.controller";
+import * as CoinPayoutController from "../controllers/admin/coin-payout.controller";
 import * as TrainingProgramController from "../controllers/admin/training-program.controller";
 import * as EnterpriseController from "../controllers/admin/enterprise.controller";
 import * as SOSController from "../controllers/admin/sos.controller";
@@ -303,6 +305,22 @@ adminRouter.get(
 );
 
 adminRouter.put(
+  "/drivers/:id/block",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.DRIVERS_BLOCK),
+  ErrorHandlerMiddleware(DriverController.blockDriver),
+  ResponseMiddleware,
+);
+
+adminRouter.post(
+  "/drivers/:id/notify",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.DRIVERS_UPDATE),
+  ErrorHandlerMiddleware(DriverController.notifyDriver),
+  ResponseMiddleware,
+);
+
+adminRouter.put(
   "/drivers/:id/verify",
   verifyAdminToken,
   requirePermission(PERMISSIONS.DRIVERS_VERIFY),
@@ -495,6 +513,31 @@ adminRouter.get(
   verifyAdminToken,
   requirePermission(PERMISSIONS.PROMOS_VIEW),
   ErrorHandlerMiddleware(PromoController.getPromoStats),
+  ResponseMiddleware,
+);
+
+// ============ CONTENT (Terms / Privacy / About / Refund / Cancellation) ============
+adminRouter.get(
+  "/content",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SETTINGS_VIEW),
+  ErrorHandlerMiddleware(ContentController.listContent),
+  ResponseMiddleware,
+);
+
+adminRouter.get(
+  "/content/:type",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SETTINGS_VIEW),
+  ErrorHandlerMiddleware(ContentController.getContentByType),
+  ResponseMiddleware,
+);
+
+adminRouter.put(
+  "/content/:type",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SETTINGS_UPDATE),
+  ErrorHandlerMiddleware(ContentController.updateContent),
   ResponseMiddleware,
 );
 
@@ -1531,6 +1574,38 @@ adminRouter.put(
   verifyAdminToken,
   requirePermission(PERMISSIONS.FINANCE_VIEW),
   ErrorHandlerMiddleware(PayoutController.rejectPayout),
+  ResponseMiddleware,
+);
+
+// Customer coin→bank payouts — same manual lifecycle as driver payouts
+// (approve → pay with UTR / reject with a coin refund). Requests are created by
+// customers from the app, so there is no admin "create" here.
+adminRouter.get(
+  "/finance/coin-payouts",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.FINANCE_VIEW),
+  ErrorHandlerMiddleware(CoinPayoutController.listCoinPayouts),
+  ResponseMiddleware,
+);
+adminRouter.put(
+  "/finance/coin-payouts/:id/approve",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.FINANCE_VIEW),
+  ErrorHandlerMiddleware(CoinPayoutController.approveCoinPayout),
+  ResponseMiddleware,
+);
+adminRouter.put(
+  "/finance/coin-payouts/:id/pay",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.FINANCE_VIEW),
+  ErrorHandlerMiddleware(CoinPayoutController.markCoinPayoutPaid),
+  ResponseMiddleware,
+);
+adminRouter.put(
+  "/finance/coin-payouts/:id/reject",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.FINANCE_VIEW),
+  ErrorHandlerMiddleware(CoinPayoutController.rejectCoinPayout),
   ResponseMiddleware,
 );
 

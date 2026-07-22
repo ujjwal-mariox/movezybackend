@@ -40,6 +40,17 @@ const UserSchema: Schema<IUser> = new Schema(
       unique: true,
       match: [/^[6-9]\d{9}$/, "Please enter a valid 10-digit mobile number!"],
     },
+    /**
+     * Whether the customer agreed to receive booking updates over WhatsApp.
+     * The login screen has always shown this checkbox, but the value was only
+     * ever held in widget state and thrown away — so an opt-in was never
+     * recorded, and neither was an opt-out. Consent for marketing messages has
+     * to be stored to be worth anything.
+     */
+    whatsappOptIn: {
+      type: Boolean,
+      default: false,
+    },
     isActive: {
       type: Boolean,
       default: true,

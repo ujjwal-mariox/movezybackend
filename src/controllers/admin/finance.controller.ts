@@ -44,6 +44,11 @@ export const getFinanceOverview = async (req: Request, res: Response) => {
               $group: {
                 _id: null,
                 grossRevenue: { $sum: "$finalFare" },
+                // Real commission, frozen per booking at completion. This page
+                // used to derive it as a flat 20% of gross — a number the
+                // platform was not actually taking, since no commission was
+                // deducted from driver payouts at all.
+                realCommission: { $sum: { $ifNull: ["$commissionAmount", 0] } },
                 totalOrders: { $sum: 1 },
                 avgOrderValue: { $avg: "$finalFare" },
               },
@@ -70,9 +75,9 @@ export const getFinanceOverview = async (req: Request, res: Response) => {
           ])
           .toArray(),
 
-        // Commission is not stored per-booking; approximate as a share of gross
-        // via platformFeePercentage after the aggregation (see below). Keep this
-        // slot returning gross so the ratio math stays simple.
+        // Commission is stored per booking now (commissionAmount, frozen at
+        // completion), so this returns gross and the real commission is summed
+        // alongside it rather than approximated afterwards.
         bookingsCollection
           .aggregate([
             {
@@ -125,6 +130,7 @@ export const getFinanceOverview = async (req: Request, res: Response) => {
                   $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
                 },
                 revenue: { $sum: "$finalFare" },
+                commission: { $sum: { $ifNull: ["$commissionAmount", 0] } },
                 orders: { $sum: 1 },
               },
             },
@@ -134,16 +140,15 @@ export const getFinanceOverview = async (req: Request, res: Response) => {
       ]);
 
     const gross = revenueAgg[0]?.grossRevenue || 0;
-    // Approximate platform commission from gross using the configured fee %.
-    const COMMISSION_PCT = 20; // fallback if app-config unavailable
-    const commission = Math.round((gross * COMMISSION_PCT) / 100);
+    // What was actually retained, summed from each booking's frozen
+    // commissionAmount — not a flat percentage of gross applied after the fact.
+    const commission = Math.round(revenueAgg[0]?.realCommission || 0);
     const refunds = refundAgg[0]?.totalRefunds || 0;
 
-    // The revenue chart plots a "commission" line; derive it per day from the
-    // same flat rate so the series isn't empty.
+    // The chart's commission line now comes from the same real figure.
     const dailyRevenueWithCommission = (dailyRevenue || []).map((d: any) => ({
       ...d,
-      commission: Math.round(((d.revenue || 0) * COMMISSION_PCT) / 100),
+      commission: Math.round(d.commission || 0),
     }));
 
     res.locals.data = {
@@ -276,10 +281,21 @@ export const getDriverEarnings = async (req: Request, res: Response) => {
               $sum: { $cond: [{ $eq: ["$status", "COMPLETED"] }, 1, 0] },
             },
             earnings: {
+              // driverEarnings, not finalFare: this figure prefills the
+              // payout dialog. The gross fare includes the customer's GST and
+              // the platform commission — paying it out would overpay every
+              // driver by roughly a quarter. Legacy trips completed before
+              // driverEarnings existed fall back to the gross so their rows
+              // aren't zero, but anything settled recently uses the real net.
               $sum: {
                 $cond: [
                   { $eq: ["$status", "COMPLETED"] },
-                  { $ifNull: ["$finalFare", "$fare"] },
+                  {
+                    $ifNull: [
+                      "$driverEarnings",
+                      { $ifNull: ["$finalFare", "$fare"] },
+                    ],
+                  },
                   0,
                 ],
               },
@@ -499,7 +515,7 @@ export const getDashboardAlerts = async (req: Request, res: Response) => {
 
     const bookingsCollection = db.collection("bookings");
     const driversCollection = db.collection("drivers");
-    const sosCollection = db.collection("sos_alerts");
+    const sosCollection = db.collection("sosalerts");
 
     // 1. Unassigned orders
     const unassignedCount = await bookingsCollection.countDocuments({
@@ -518,7 +534,7 @@ export const getDashboardAlerts = async (req: Request, res: Response) => {
 
     // 2. Active SOS alerts
     const activeSOS = await sosCollection.countDocuments({
-      status: { $in: ["triggered", "acknowledged"] },
+      status: { $in: ["ACTIVE", "RESPONDED"] },
     });
     if (activeSOS > 0) {
       alerts.push({
@@ -607,7 +623,7 @@ export const getLiveStats = async (req: Request, res: Response) => {
     const bookingsCollection = db.collection("bookings");
     const driversCollection = db.collection("drivers");
     const usersCollection = db.collection("users");
-    const sosCollection = db.collection("sos_alerts");
+    const sosCollection = db.collection("sosalerts");
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -623,6 +639,7 @@ export const getLiveStats = async (req: Request, res: Response) => {
       totalUsers,
       todayCancelled,
       todayTotal,
+      delayedOrders,
     ] = await Promise.all([
       bookingsCollection.countDocuments({}),
       bookingsCollection.countDocuments({
@@ -644,7 +661,7 @@ export const getLiveStats = async (req: Request, res: Response) => {
       driversCollection.countDocuments({ isOnline: true, status: "approved" }),
       driversCollection.countDocuments({ status: "approved" }),
       sosCollection.countDocuments({
-        status: { $in: ["triggered", "acknowledged"] },
+        status: { $in: ["ACTIVE", "RESPONDED"] },
       }),
       usersCollection.countDocuments({ isDeleted: { $ne: true } }),
       bookingsCollection.countDocuments({
@@ -652,6 +669,12 @@ export const getLiveStats = async (req: Request, res: Response) => {
         status: "CANCELLED",
       }),
       bookingsCollection.countDocuments({ createdAt: { $gte: today } }),
+      // Active trips past their estimated drop time — the dashboard's
+      // "Delayed Orders" card read a field this endpoint never returned.
+      bookingsCollection.countDocuments({
+        status: { $in: ["ASSIGNED", "DRIVER_ARRIVED", "PICKED", "IN_PROGRESS"] },
+        estimatedDropTime: { $ne: null, $lt: new Date() },
+      }),
     ]);
 
     const failureRate =
@@ -672,6 +695,8 @@ export const getLiveStats = async (req: Request, res: Response) => {
       totalUsers,
       failureRate: Number(failureRate),
       driverUtilization: Number(utilization),
+      delayedOrders,
+      cancelledToday: todayCancelled,
     };
   } catch (err) {
     console.error("[Dashboard] Live stats error:", err);

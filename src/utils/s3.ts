@@ -54,6 +54,34 @@ export const uploadFileToAws = async (files: Express.Multer.File[]) => {
 };
 
 /**
+ * Upload a raw buffer (for files we generate server-side rather than receive
+ * via Multer, e.g. invoice PDFs). Returns the public URL.
+ */
+export const uploadBufferToAws = async (
+  buffer: Buffer,
+  key: string,
+  contentType: string,
+): Promise<string> => {
+  if (!buffer || buffer.length === 0) {
+    throw new Error("Invalid file buffer");
+  }
+
+  const upload = new Upload({
+    client: s3Client,
+    params: {
+      Bucket: config.aws.bucket,
+      Key: key,
+      Body: buffer,
+      ContentType: contentType,
+    },
+    queueSize: 3,
+  });
+
+  const data = await upload.done();
+  return data.Location as string;
+};
+
+/**
  * Upload multiple files (Multer based)
  */
 export const uploadMultipleFilesToAws = async (
@@ -88,5 +116,6 @@ export const uploadMultipleFilesToAws = async (
 
 export default {
   uploadFileToAws,
+  uploadBufferToAws,
   uploadMultipleFilesToAws,
 };

@@ -27,6 +27,9 @@ router.post("/tickets/:ticketId/close", supportController.closeTicket);
 // Get FAQs
 router.get("/faqs", supportController.getFAQs);
 
+// Was this answer helpful? The app's 👍/👎 posted nowhere before.
+router.post("/faqs/:faqId/feedback", supportController.rateFAQ);
+
 // Get help topics/categories
 router.get("/topics", supportController.getHelpTopics);
 

@@ -111,8 +111,17 @@ const AdminAuthMiddleware = () => {
       const roleDoc = admin.roleId as any;
       const rolePermissions = roleDoc?.permissions || [];
       const customPermissions = admin.customPermissions || [];
+      // Stored permissions too: the seeded super admin carries
+      // permissions:["all"] directly on the Admin doc with no roleId, and
+      // ignoring it locked the only existing account out of every
+      // requirePermission route with a 403.
+      const storedPermissions = admin.permissions || [];
       const allPermissions = [
-        ...new Set([...rolePermissions, ...customPermissions]),
+        ...new Set([
+          ...rolePermissions,
+          ...customPermissions,
+          ...storedPermissions,
+        ]),
       ];
 
       // Attach admin with computed permissions to request
@@ -173,10 +182,13 @@ const AdminAuthMiddleware = () => {
         });
       }
 
-      // Super admin has all permissions
+      // Super admin has all permissions. "all" is how the seed grants
+      // full access (the Admin schema has no `role` path — the seed's
+      // role:"SUPER_ADMIN" was silently dropped by strict mode).
       if (
         req.admin.roleName === "Super Admin" ||
-        req.admin.role === "SUPER_ADMIN"
+        req.admin.role === "SUPER_ADMIN" ||
+        (req.admin.permissions || []).includes("all")
       ) {
         return next();
       }
