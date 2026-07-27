@@ -1,5 +1,14 @@
 import { Types } from "mongoose";
 
+export type DocumentReviewStatus = "PENDING" | "VERIFIED" | "REJECTED";
+
+export interface IDocumentReview {
+  status: DocumentReviewStatus;
+  reviewedAt?: Date;
+  reviewedBy?: Types.ObjectId;
+  rejectionReason?: string;
+}
+
 export interface IDriverKyc {
   driverId: Types.ObjectId;
 
@@ -33,6 +42,15 @@ export interface IDriverKyc {
   city?: string;
   bodyType?: string;
   fuelType?: string;
+
+  /**
+   * Per-document review state.
+   *
+   * `isVerified` below is a single flag covering the whole KYC set, so an admin
+   * approving one document necessarily approved all five. Each document now
+   * carries its own verdict; `isVerified` is derived from them.
+   */
+  documentStatus?: Record<string, IDocumentReview>;
 
   isVerified?: boolean;
   verifiedAt?: Date;

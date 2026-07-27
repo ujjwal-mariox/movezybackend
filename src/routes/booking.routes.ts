@@ -74,6 +74,15 @@ router.post("/:bookingId/apply-promo", bookingController.applyPromoCode);
 // Apply coins
 router.post("/:bookingId/apply-coins", bookingController.applyCoins);
 
+// Add an intermediate stop to a trip already under way (re-prices the booking).
+// Rate-limited like booking creation: it re-routes through the external router
+// and rewrites the fare, so it is not a cheap read.
+router.post(
+  "/:bookingId/stops",
+  rateLimiters.booking,
+  bookingController.addStop,
+);
+
 // Cancel scheduled booking
 router.delete(
   "/scheduled/:bookingId",
@@ -81,6 +90,12 @@ router.delete(
 );
 
 // Cancel booking
+// What cancelling now would refund, so the app can warn before confirming.
+router.get(
+  "/:bookingId/cancellation-preview",
+  bookingController.getCancellationPreview,
+);
+
 router.post("/:bookingId/cancel", bookingController.cancelBooking);
 
 // Rate booking/driver

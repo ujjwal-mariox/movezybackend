@@ -167,6 +167,7 @@ export const renderInvoicePdf = async ({
     ["Time charge", invoice.timeCharge],
     ["Surge charge", invoice.surgeCharge],
     ["Add-ons", invoice.addonCharges],
+    ["Extra stops", (invoice as any).stopCharges || 0],
     ["Loading / unloading", invoice.loadingUnloadingCharge],
     ["Waiting charge", invoice.waitingCharge],
     ["Toll charges", invoice.tollCharges],

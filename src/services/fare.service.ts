@@ -9,6 +9,16 @@ export interface FareBreakdown {
   surgeCharge: number;
   surgeMultiplier: number;
   addonCharges: number;
+  /**
+   * Per-stop charge, reported separately.
+   *
+   * It used to be folded into `addonCharges`, so a customer who added 2 stops
+   * and picked no add-ons saw "Add-on services ₹60" — a charge attributed to
+   * services they never chose — and the app's "Extra stops" row could never
+   * render. The subtotal already added the two separately, so splitting the
+   * REPORTED figure changes attribution only, never the amount paid.
+   */
+  stopCharges: number;
   loadingUnloadingCharge: number;
   waitingCharge: number;
   tollCharges: number;
@@ -187,7 +197,8 @@ export const calculateFare = async (
     timeCharge: Math.round(timeCharge * 100) / 100,
     surgeCharge: Math.round(surgeCharge * 100) / 100,
     surgeMultiplier,
-    addonCharges: Math.round((addonCharges + stopCharges) * 100) / 100,
+    addonCharges: Math.round(addonCharges * 100) / 100,
+    stopCharges: Math.round(stopCharges * 100) / 100,
     loadingUnloadingCharge: Math.round(loadingUnloadingCharge * 100) / 100,
     waitingCharge: 0, // Calculated after trip
     tollCharges: Math.round(tollCharges * 100) / 100,

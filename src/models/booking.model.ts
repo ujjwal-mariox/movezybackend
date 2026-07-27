@@ -97,6 +97,8 @@ const BookingSchema = new Schema<IBooking>(
     // Add-on services (Loading/Unloading)
     addons: [BookingAddonSchema],
     addonTotal: { type: Number, default: 0 },
+    /** Per-stop charge, kept apart from addonTotal so the bill can itemise it. */
+    stopCharges: { type: Number, default: 0 },
 
     // Loading/Unloading specific
     loadingUnloading: {
@@ -198,6 +200,12 @@ const BookingSchema = new Schema<IBooking>(
       index: true,
     },
     paymentTransactionId: String,
+
+    // Fare added after the payment was captured (stops added mid-trip). The
+    // delta is never auto-charged to the card — the driver collects it in cash
+    // at delivery — so the booking stays PAID for what was actually paid and
+    // this holds what is still owed.
+    pendingCashTopUp: { type: Number, default: 0 },
 
     // Cancellation
     cancellationReasonId: {

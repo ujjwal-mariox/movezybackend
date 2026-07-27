@@ -235,7 +235,11 @@ const preflight = () => {
     );
   }
 
-  if (!process.env.RAZORPAY_KEY_ID || !process.env.PAYMENT_WEBHOOK_SECRET) {
+  // payment.service.ts accepts the legacy RAZORPAY_WEBHOOK_SECRET name too, so
+  // check both — otherwise this warns on a perfectly working configuration.
+  const webhookSecret =
+    process.env.PAYMENT_WEBHOOK_SECRET || process.env.RAZORPAY_WEBHOOK_SECRET;
+  if (!process.env.RAZORPAY_KEY_ID || !webhookSecret) {
     warn.push("Razorpay key or webhook secret missing — payments will fail.");
   }
   if (!process.env.FIREBASE_PROJECT_ID) {

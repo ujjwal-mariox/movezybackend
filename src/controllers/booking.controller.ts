@@ -534,6 +534,7 @@ export const createBooking = async (req: Request, res: Response) => {
         quantity: addon.quantity || 1,
       })),
       addonTotal,
+      stopCharges: fareBreakdown.stopCharges || 0,
       // Store the floors the customer declared (validated/clamped), not
       // whatever the request body happened to contain — `charge` in particular
       // must never come from the client. The driver needs the floor count on
@@ -885,6 +886,283 @@ export const applyCoins = async (req: Request, res: Response) => {
   }
 };
 
+/** How many intermediate stops a single booking may carry. */
+const MAX_EXTRA_STOPS = 3;
+
+/**
+ * The only statuses where adding a stop makes sense: a driver exists and the
+ * trip is still running. DRAFT/SEARCHING have nobody to re-route (the customer
+ * should edit the booking); COMPLETED/CANCELLED have nothing left to route.
+ */
+const STOP_ADDABLE_STATUSES = [
+  "ASSIGNED",
+  "DRIVER_ARRIVED",
+  "PICKED",
+  "IN_PROGRESS",
+];
+
+/**
+ * Add an intermediate stop to a trip that is already under way.
+ *
+ * The client sends only WHERE the stop is. The route, the distance and the new
+ * fare are all recomputed server-side from the booking's own stored inputs, the
+ * same way createBooking built them — money is never taken from the request.
+ *
+ * The extra money is always collected in CASH at delivery. A card that has
+ * already been charged is never charged again; the difference is recorded on
+ * the booking as `pendingCashTopUp` instead.
+ */
+export const addStop = async (req: Request, res: Response) => {
+  try {
+    const { bookingId } = req.params;
+    const userId = (req as any).user._id;
+    const { address, lat, lng, contactName, contactPhone } = req.body;
+
+    // A malformed id would otherwise throw a CastError and surface as a 500.
+    if (!mongoose.Types.ObjectId.isValid(bookingId)) {
+      return res.status(404).json({
+        success: false,
+        message: "Booking not found",
+      });
+    }
+
+    const stopAddress = typeof address === "string" ? address.trim() : "";
+    if (!stopAddress) {
+      return res.status(400).json({
+        success: false,
+        message: "An address is required for the new stop.",
+      });
+    }
+
+    // (0, 0) is rejected alongside out-of-range values: the router treats it as
+    // an unusable waypoint and silently drops that leg, which would re-price
+    // the trip as if the stop had never been added.
+    const stopLat = Number(lat);
+    const stopLng = Number(lng);
+    if (
+      !Number.isFinite(stopLat) ||
+      !Number.isFinite(stopLng) ||
+      Math.abs(stopLat) > 90 ||
+      Math.abs(stopLng) > 180 ||
+      (stopLat === 0 && stopLng === 0)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid coordinates are required for the new stop.",
+      });
+    }
+
+    const booking = await Booking.findOne({ _id: bookingId, userId });
+
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        message: "Booking not found",
+      });
+    }
+
+    if (booking.status === "DRAFT" || booking.status === "SEARCHING") {
+      return res.status(400).json({
+        success: false,
+        message:
+          "No driver has been assigned yet. Please edit the booking instead of adding a stop.",
+      });
+    }
+
+    if (booking.status === "COMPLETED" || booking.status === "CANCELLED") {
+      return res.status(400).json({
+        success: false,
+        message: `This trip is already ${
+          booking.status === "COMPLETED" ? "completed" : "cancelled"
+        }, so a stop can no longer be added.`,
+      });
+    }
+
+    if (!STOP_ADDABLE_STATUSES.includes(booking.status)) {
+      return res.status(400).json({
+        success: false,
+        message: "A stop cannot be added to this booking right now.",
+      });
+    }
+
+    if ((booking.stops?.length ?? 0) >= MAX_EXTRA_STOPS) {
+      return res.status(400).json({
+        success: false,
+        message: `You can add up to ${MAX_EXTRA_STOPS} extra stops to a booking.`,
+      });
+    }
+
+    // Push rather than reassign the array: the existing entries carry
+    // `completedAt`, which the driver's multi-stop flow reads to know which
+    // drops are already done.
+    if (!booking.stops) booking.stops = [];
+    const stops = booking.stops;
+    stops.push({
+      address: stopAddress,
+      lat: stopLat,
+      lng: stopLng,
+      contactName:
+        typeof contactName === "string" ? contactName.trim() : undefined,
+      contactPhone:
+        typeof contactPhone === "string" ? contactPhone.trim() : undefined,
+    });
+
+    // Road distance through pickup → every stop in order → drop, resolved the
+    // same way createBooking resolves it, so the recomputed fare is built from
+    // the same kind of figure the original one was.
+    const resolvedRoute = await getDistanceForLegs([
+      { lat: booking.pickup.lat, lng: booking.pickup.lng },
+      ...stops.map((stop) => ({ lat: stop.lat, lng: stop.lng })),
+      { lat: booking.drop.lat, lng: booking.drop.lng },
+    ]);
+
+    if (!resolvedRoute) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "We could not work out a route through that stop. Please check the location and try again.",
+      });
+    }
+
+    // Re-price from the booking's OWN stored inputs, never from the request.
+    // Floors, weight and add-ons go back through the same resolvers
+    // createBooking uses, so the two paths cannot price differently.
+    const bookingFloors = resolveFloors(booking.loadingUnloading);
+    const resolvedAddons = await resolveAddonsForFare(
+      booking.addons,
+      bookingFloors,
+      resolveGoodsWeight(booking.goodsWeight),
+    );
+
+    const fareBreakdown = await FareService.calculateFare({
+      vehicleTypeId: booking.vehicleTypeId,
+      distanceKm: resolvedRoute.distanceKm,
+      durationMin: resolvedRoute.durationMin,
+      serviceType: booking.serviceType || "WITHIN_CITY",
+      addons: resolvedAddons,
+      // Priced through the add-ons, exactly as createBooking does it.
+      loadingUnloadingCharge: 0,
+      stops: stops.length,
+      // Pin surge to when the booking was made. calculateFare defaults to
+      // "now", so a stop added after the night/peak window opened would surge
+      // the WHOLE trip retroactively and bill a multiplier the customer never
+      // accepted. The difference must reflect the added stop and nothing else.
+      scheduledTime: booking.createdAt,
+    });
+
+    // Discounts already granted stay granted. createBooking subtracts them from
+    // the fare service's figure, so the same subtraction has to happen here or
+    // the top-up would quietly claw the promo/coins back.
+    const previousFare = booking.finalFare;
+    const carriedDiscount =
+      (booking.promoDiscount || 0) + (booking.coinDiscount || 0);
+    const newFinalFare =
+      Math.round(Math.max(0, fareBreakdown.finalFare - carriedDiscount) * 100) /
+      100;
+    const fareDifference =
+      Math.round((newFinalFare - previousFare) * 100) / 100;
+
+    // Persist the recomputed trip. Same field composition createBooking stores,
+    // so the invoice and the trip screen keep adding up.
+    const addonTotal = fareBreakdown.addonCharges || 0;
+    booking.distanceKm = resolvedRoute.distanceKm;
+    booking.durationMin = resolvedRoute.durationMin;
+    booking.baseFare = fareBreakdown.baseFare;
+    booking.distanceCharge = fareBreakdown.distanceCharge;
+    booking.timeCharge = fareBreakdown.timeCharge || 0;
+    booking.surgeFare = fareBreakdown.surgeCharge || 0;
+    booking.surgeMultiplier = fareBreakdown.surgeMultiplier || 1;
+    booking.addonTotal = addonTotal;
+    booking.gstAmount = fareBreakdown.gstAmount || 0;
+    booking.gstPercentage = fareBreakdown.gstPercentage || 5;
+    booking.subtotal =
+      fareBreakdown.baseFare +
+      fareBreakdown.distanceCharge +
+      (fareBreakdown.timeCharge || 0) +
+      (fareBreakdown.surgeCharge || 0) +
+      addonTotal;
+    booking.fare = newFinalFare;
+    booking.finalFare = newFinalFare;
+
+    // CASH ONLY. If the booking was already paid, the payment stands for the
+    // original amount and the difference becomes cash owed to the driver — the
+    // card is never touched again.
+    const payableNow = booking.paymentStatus === "PAID" && fareDifference > 0;
+    if (payableNow) {
+      booking.pendingCashTopUp =
+        (booking.pendingCashTopUp || 0) + fareDifference;
+    }
+
+    await booking.save();
+
+    const message = payableNow
+      ? `Stop added. ₹${fareDifference.toFixed(
+          2,
+        )} extra is payable in cash to the driver at delivery.`
+      : fareDifference > 0
+        ? `Stop added. Your fare is now ₹${newFinalFare.toFixed(
+            2,
+          )} — ₹${fareDifference.toFixed(2)} more, payable to the driver.`
+        : `Stop added. Your fare stays at ₹${newFinalFare.toFixed(2)}.`;
+
+    // Tell the driver their route changed. Never allowed to fail the request:
+    // the stop is already saved and the fare already recomputed, so a push or
+    // socket failure must not report an error for work that succeeded.
+    if (booking.driverId) {
+      try {
+        emitToUser(String(booking.driverId), "booking:stop_added", {
+          bookingId: String(booking._id),
+          stop: { address: stopAddress, lat: stopLat, lng: stopLng },
+          stops: booking.stops,
+          distanceKm: booking.distanceKm,
+          durationMin: booking.durationMin,
+          finalFare: newFinalFare,
+          // What the driver has to collect on top of an already-paid booking.
+          pendingCashTopUp: booking.pendingCashTopUp || 0,
+          message: `A new stop was added: ${stopAddress}`,
+        });
+      } catch (socketErr) {
+        console.error("Failed to emit stop_added to driver:", socketErr);
+      }
+
+      NotificationService.sendToDriver(
+        booking.driverId as Types.ObjectId,
+        "BOOKING",
+        "Stop added",
+        `The customer added a new stop: ${stopAddress}`,
+        {
+          bookingId: String(booking._id),
+          stopAddress,
+          pendingCashTopUp: String(booking.pendingCashTopUp || 0),
+        },
+        booking._id as Types.ObjectId,
+        "Booking",
+      ).catch((notifyErr) =>
+        console.error("Failed to notify driver about added stop:", notifyErr),
+      );
+    }
+
+    res.json({
+      success: true,
+      data: {
+        stops: booking.stops,
+        distanceKm: booking.distanceKm,
+        durationMin: booking.durationMin,
+        previousFare,
+        finalFare: newFinalFare,
+        fareDifference,
+        payableNow,
+        message,
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to add stop",
+    });
+  }
+};
+
 /**
  * Schedule a booking
  */
@@ -968,6 +1246,85 @@ export const cancelScheduledBooking = async (req: Request, res: Response) => {
 /**
  * Cancel booking
  */
+/**
+ * Refund ceiling for a booking at its CURRENT stage, straight from FareConfig.
+ *
+ * Shared by the cancellation preview and the cancellation itself so the figure
+ * the customer is shown before confirming is the figure they actually get.
+ */
+const refundCeilingForStage = async (status: string): Promise<number> => {
+  const cfg = await FareConfig.findOne({ isActive: true })
+    .select(
+      "refundBeforeAssignPercent refundAfterAssignPercent refundAfterPickupPercent",
+    )
+    .lean();
+  if (status === "DRAFT" || status === "SEARCHING") {
+    return Number((cfg as any)?.refundBeforeAssignPercent ?? 100);
+  }
+  if (status === "ASSIGNED" || status === "DRIVER_ARRIVED") {
+    return Number((cfg as any)?.refundAfterAssignPercent ?? 100);
+  }
+  // PICKED / IN_PROGRESS — goods are aboard.
+  return Number((cfg as any)?.refundAfterPickupPercent ?? 0);
+};
+
+/**
+ * What cancelling right now would refund — WITHOUT cancelling.
+ *
+ * The apps offered "Cancel" with no indication of the consequence, so a
+ * customer could cancel after pickup and discover only afterwards that the
+ * policy refunds nothing. The percentages are admin-configurable, so the client
+ * must ask rather than hardcode them.
+ */
+export const getCancellationPreview = async (req: Request, res: Response) => {
+  try {
+    const { bookingId } = req.params;
+    const userId = (req as any).user._id;
+
+    const booking = await Booking.findOne({ _id: bookingId, userId }).select(
+      "status finalFare paymentStatus",
+    );
+    if (!booking) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Booking not found" });
+    }
+
+    const cancellable = [
+      "DRAFT",
+      "SEARCHING",
+      "ASSIGNED",
+      "DRIVER_ARRIVED",
+      "PICKED",
+      "IN_PROGRESS",
+    ].includes(booking.status);
+
+    const refundPercentage = await refundCeilingForStage(booking.status);
+    const wasPaid = booking.paymentStatus === "PAID";
+
+    res.json({
+      success: true,
+      data: {
+        cancellable,
+        status: booking.status,
+        // Goods already collected — the app warns harder for this.
+        afterPickup: ["PICKED", "IN_PROGRESS"].includes(booking.status),
+        wasPaid,
+        refundPercentage,
+        refundAmount:
+          wasPaid && refundPercentage > 0
+            ? Math.round((booking.finalFare * refundPercentage) / 100)
+            : 0,
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to load cancellation details",
+    });
+  }
+};
+
 export const cancelBooking = async (req: Request, res: Response) => {
   try {
     const { bookingId } = req.params;
@@ -995,20 +1352,7 @@ export const cancelBooking = async (req: Request, res: Response) => {
     // `status !== "PENDING"` guard was dead: PENDING is a payment status, not
     // a booking one, so it was never false.) Ceilings live in FareConfig so
     // the policy stays the admin's to set, not the code's.
-    const cancelStage = booking.status;
-    const refundConfig = await FareConfig.findOne({ isActive: true })
-      .select(
-        "refundBeforeAssignPercent refundAfterAssignPercent refundAfterPickupPercent",
-      )
-      .lean();
-
-    const stageCeiling =
-      cancelStage === "DRAFT" || cancelStage === "SEARCHING"
-        ? Number((refundConfig as any)?.refundBeforeAssignPercent ?? 100)
-        : cancelStage === "ASSIGNED" || cancelStage === "DRIVER_ARRIVED"
-          ? Number((refundConfig as any)?.refundAfterAssignPercent ?? 100)
-          : // PICKED / IN_PROGRESS — goods are aboard.
-            Number((refundConfig as any)?.refundAfterPickupPercent ?? 0);
+    const stageCeiling = await refundCeilingForStage(booking.status);
 
     let refundPercentage = stageCeiling;
     if (cancellationReasonId) {
@@ -1108,6 +1452,14 @@ export const cancelBooking = async (req: Request, res: Response) => {
         refundPercentage,
         refundProcessed: refundResult.success,
         coinsRestored: coinsToRestore,
+        // The app used to assert "funds have been returned" on every
+        // cancellation. It needs the real figures to say anything truthful:
+        // what was actually paid, and what is actually coming back.
+        wasPaid,
+        refundAmount:
+          wasPaid && refundPercentage > 0
+            ? Math.round((booking.finalFare * refundPercentage) / 100)
+            : 0,
       },
     });
   } catch (error: any) {

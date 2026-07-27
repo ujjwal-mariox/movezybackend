@@ -95,6 +95,7 @@ export interface IBooking {
   // Addons
   addons?: IBookingAddon[];
   addonTotal?: number;
+  stopCharges?: number;
   loadingUnloading?: ILoadingUnloading;
 
   // Waiting & tolls
@@ -145,6 +146,13 @@ export interface IBooking {
   paymentMethod?: PaymentMethod;
   paymentStatus?: PaymentStatus;
   paymentTransactionId?: string;
+  /**
+   * Fare added AFTER the payment was captured — today, stops the customer adds
+   * mid-trip. It is never auto-charged back to the card: `paymentStatus` stays
+   * PAID for the amount actually paid and this carries what the driver still
+   * has to collect in cash at delivery.
+   */
+  pendingCashTopUp?: number;
 
   // Cancellation
   cancellationReasonId?: Types.ObjectId;

@@ -68,9 +68,28 @@ router.use("/driver", driverAuthRoutes);
 // Driver App routes (authenticated driver features)
 router.use("/driver/app", driverRoutes);
 
+// Support contact the apps dial. Public: it is a published number, and the
+// apps need it before a user is authenticated (e.g. help from the login screen).
+router.get("/support-contact", async (_req, res) => {
+  try {
+    const doc = await AppConfig.findOne({ key: "SUPPORT_PHONE" }).lean();
+    res.json({
+      success: true,
+      data: {
+        supportPhone: (doc as any)?.value ? String((doc as any).value) : "",
+      },
+    });
+  } catch {
+    // Never fail a screen over a contact number — an empty value simply hides
+    // the call buttons.
+    res.json({ success: true, data: { supportPhone: "" } });
+  }
+});
+
 // Public legal/informational content (terms, privacy, about, refund,
 // cancellation) — read-only, no auth, edited from the admin CMS.
 import { getPublicContent } from "../controllers/admin/content.controller";
+import { AppConfig } from "../models/app-config.model";
 import ErrorHandlerMiddleware from "../middlewares/error-handler.middleware";
 import ResponseMiddleware from "../middlewares/response.middleware";
 router.get(

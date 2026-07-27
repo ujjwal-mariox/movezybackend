@@ -1645,23 +1645,35 @@ export const collectCashPayment = async (
       return next();
     }
 
-    // Guard against marking a prepaid trip PAID-by-cash. Cash collection is only
-    // valid for a COD booking that hasn't already been settled online/by wallet;
-    // otherwise this would overwrite a real Razorpay payment and imply the driver
-    // took cash for a trip the customer already paid for.
-    if (booking.paymentMethod !== "CASH") {
+    // Fare added after the card was charged (stops the customer added mid-trip).
+    // The server never re-charges the card for it — the driver collects it in
+    // cash — so a PREPAID booking carrying one is a legitimate cash collection.
+    const topUp = Number((booking as any).pendingCashTopUp ?? 0);
+
+    // Guard against marking a prepaid trip PAID-by-cash, which would overwrite a
+    // real Razorpay payment. Still allowed when there is a top-up to collect.
+    if (booking.paymentMethod !== "CASH" && topUp <= 0) {
       req.rCode = 0;
       req.msg = "not_a_cash_booking";
       return next();
     }
-    if (booking.paymentStatus === "PAID") {
+
+    if (
+      booking.paymentMethod === "CASH" &&
+      booking.paymentStatus === "PAID" &&
+      topUp <= 0
+    ) {
       // Already settled — treat as a no-op success so a retry doesn't error.
       req.rData = scrubOtps((booking as any).toObject?.() ?? booking);
       req.msg = "cash_collected";
       return next();
     }
 
-    booking.paymentStatus = "PAID";
+    // Clearing the top-up is what records that the driver actually took it;
+    // leaving it set would keep demanding the money on every reopen.
+    if (topUp > 0) (booking as any).pendingCashTopUp = 0;
+    // Only a COD fare becomes PAID here — a prepaid fare already was.
+    if (booking.paymentMethod === "CASH") booking.paymentStatus = "PAID";
     await booking.save();
 
     req.rData = scrubOtps((booking as any).toObject?.() ?? booking);

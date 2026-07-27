@@ -13,6 +13,7 @@ export interface IInvoice {
   timeCharge: number;
   surgeCharge: number;
   addonCharges: number;
+  stopCharges: number;
   loadingUnloadingCharge: number;
   waitingCharge: number;
   tollCharges: number;
@@ -74,6 +75,7 @@ const InvoiceSchema = new Schema<IInvoice>(
     timeCharge: { type: Number, default: 0, min: 0 },
     surgeCharge: { type: Number, default: 0, min: 0 },
     addonCharges: { type: Number, default: 0, min: 0 },
+    stopCharges: { type: Number, default: 0, min: 0 },
     loadingUnloadingCharge: { type: Number, default: 0, min: 0 },
     waitingCharge: { type: Number, default: 0, min: 0 },
     tollCharges: { type: Number, default: 0, min: 0 },

@@ -6,6 +6,12 @@ export type MessageKey =
   | "booking_not_found"
   | "booking_fetched"
   | "invalid_otp"
+  | "invalid_delivery_otp"
+  | "complete_stops_first"
+  | "complete_previous_stops_first"
+  | "stop_already_completed"
+  | "stop_completed"
+  | "invalid_stop"
   | "arrived_at_pickup"
   | "trip_started"
   | "trip_completed"
@@ -235,6 +241,27 @@ export default function messages(lang: Lang = "en"): MessageMap {
     },
     invalid_otp: {
       en: "Incorrect pickup OTP. Please ask the customer to read it out again.",
+    },
+    // These were introduced with the delivery-OTP gate and the multi-stop flow
+    // but never given text, and ResponseMiddleware falls back to the raw key —
+    // so drivers were shown "complete_stops_first" as their error message.
+    invalid_delivery_otp: {
+      en: "That delivery OTP is incorrect. Ask the receiver to read it out again.",
+    },
+    complete_stops_first: {
+      en: "Mark every stop delivered before completing the trip.",
+    },
+    complete_previous_stops_first: {
+      en: "Deliver the earlier stops first.",
+    },
+    stop_already_completed: {
+      en: "That stop is already marked delivered.",
+    },
+    stop_completed: {
+      en: "Stop delivered.",
+    },
+    invalid_stop: {
+      en: "That stop is not part of this booking.",
     },
     // NOTE: `otp_verified` is already defined above for the login flow and is
     // reused by verifyPickupOtp — not redefined here.

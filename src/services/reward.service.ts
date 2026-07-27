@@ -1,5 +1,5 @@
 import RewardTransaction from "../models/reward-transaction.model";
-import Wallet from "../models/wallet.model";
+import { addToWallet } from "./wallet.service";
 import { Types } from "mongoose";
 
 export const addReferralReward = async (
@@ -7,17 +7,21 @@ export const addReferralReward = async (
   amount: number,
   referenceUserId: Types.ObjectId
 ) => {
-  await RewardTransaction.create({
+  const reward = await RewardTransaction.create({
     userId,
     amount,
     type: "REFERRAL",
     referenceUserId,
   });
 
-  await Wallet.findOneAndUpdate(
-    { userId },
-    { $inc: { balance: amount } },
-    { upsert: true }
+  // Credit through the shared wallet path so the balance change is explained by a
+  // WalletTransaction row. addToWallet performs the single $inc and writes the
+  // matching CREDIT row, so the balance still moves exactly once.
+  await addToWallet(
+    userId,
+    amount,
+    reward._id.toString(),
+    "Referral reward"
   );
 };
 

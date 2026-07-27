@@ -100,6 +100,8 @@ export const generateInvoice = async (
     timeCharge: booking.timeCharge || 0,
     surgeCharge: booking.surgeFare || 0,
     addonCharges: booking.addonTotal || 0,
+    // Itemised separately — previously merged into addonCharges.
+    stopCharges: (booking as any).stopCharges || 0,
     loadingUnloadingCharge: booking.loadingUnloading?.charge || 0,
     waitingCharge: booking.waitingCharge || 0,
     tollCharges: booking.tollCharges || 0,

@@ -977,3 +977,64 @@ export const getAllMasterData = async (_req: Request, res: Response) => {
 
   res.locals.data = { cities, bodyTypes, fuelTypes, vehicleTypes };
 };
+
+/**
+ * Support contact, admin-editable.
+ *
+ * Both apps used to dial a hardcoded placeholder (+91 1234567890) — including
+ * the driver app's post-accident auto-dial, which is the worst possible place
+ * for a wrong number. The number now lives in config so it can be set once and
+ * corrected without an app release, and the apps hide the call control entirely
+ * when it is unset rather than dialling something invented.
+ */
+const SUPPORT_PHONE_KEY = "SUPPORT_PHONE";
+
+export const getSupportContact = async (_req: Request, res: Response) => {
+  const doc = await AppConfig.findOne({ key: SUPPORT_PHONE_KEY }).lean();
+  res.locals.data = {
+    supportPhone: (doc as any)?.value ? String((doc as any).value) : "",
+  };
+};
+
+export const updateSupportContact = async (req: Request, res: Response) => {
+  const raw = req.body?.supportPhone;
+  const supportPhone = typeof raw === "string" ? raw.trim() : "";
+
+  // Allow clearing (empty string) — that is how an admin turns the call
+  // buttons off. Anything non-empty must look like a real dialable number.
+  if (supportPhone && !/^\+?[0-9][0-9 ()-]{6,19}$/.test(supportPhone)) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Enter a valid phone number (digits, optionally starting with +), or leave it blank to hide the call buttons.",
+    });
+  }
+
+  await AppConfig.findOneAndUpdate(
+    { key: SUPPORT_PHONE_KEY },
+    {
+      key: SUPPORT_PHONE_KEY,
+      value: supportPhone,
+      type: "STRING",
+      category: "SUPPORT",
+      description:
+        "Phone number the user and driver apps dial for support. Blank hides the call buttons.",
+      isEditable: true,
+    },
+    { upsert: true, new: true, runValidators: true },
+  );
+
+  res.locals.data = { supportPhone };
+  res.locals.message = supportPhone
+    ? "Support number updated."
+    : "Support number cleared — the apps will hide their call buttons.";
+};
+
+/** Public: what the apps read. No auth — it is a published contact number. */
+export const getPublicSupportContact = async (_req: Request, res: Response) => {
+  const doc = await AppConfig.findOne({ key: SUPPORT_PHONE_KEY }).lean();
+  res.json({
+    success: true,
+    data: { supportPhone: (doc as any)?.value ? String((doc as any).value) : "" },
+  });
+};

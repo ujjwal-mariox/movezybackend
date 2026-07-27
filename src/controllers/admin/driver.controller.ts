@@ -14,9 +14,12 @@ import * as notificationService from "../../services/notification.service";
  * document-compliance page consumes. Each entry: { type, url, expiryDate,
  * verificationStatus, isVerified, uploadedAt, verifiedAt }.
  *
- * KYC has only one top-level isVerified, and real approval lives on
- * Driver.status, so per-document verification is derived: if the driver is
- * "approved" the uploaded docs count as verified; otherwise they're "pending".
+ * Each document reports its OWN verdict from kyc.documentStatus. It used to
+ * derive every document's status from Driver.status alone, so one approval
+ * flipped all of them to verified at once and a per-document decision could
+ * never be shown. Records reviewed before per-document status existed have no
+ * verdict stored, so those still fall back to the driver-level derivation.
+ *
  * Only documents that were actually uploaded (have an image URL) are emitted;
  * types the driver hasn't uploaded are simply absent (page treats as missing).
  */
@@ -24,34 +27,51 @@ const buildDriverDocuments = (kyc: any, driverStatus?: string) => {
   if (!kyc) return [];
   const approved = driverStatus === "approved";
   const rejected = driverStatus === "rejected";
-  const statusFor = () =>
-    approved ? "verified" : rejected ? "rejected" : "pending";
-  const isVerifiedFlag = approved ? true : false;
+  const legacyStatus = approved ? "verified" : rejected ? "rejected" : "pending";
   const uploadedAt = kyc.updatedAt || kyc.createdAt;
-  const verifiedAt = approved ? kyc.verifiedAt || undefined : undefined;
 
   const docs: any[] = [];
-  const push = (type: string, url?: string, expiryDate?: string) => {
+  const push = (
+    type: string,
+    kycField: string,
+    url?: string,
+    expiryDate?: string,
+  ) => {
     if (!url) return;
+    const review = kyc.documentStatus?.[kycField];
+    const reviewed = review?.status && review.status !== "PENDING";
+    const verificationStatus = reviewed
+      ? review.status === "VERIFIED"
+        ? "verified"
+        : "rejected"
+      : review?.status === "PENDING"
+        ? "pending"
+        : legacyStatus;
+
     docs.push({
       type,
       url,
       expiryDate: expiryDate || undefined,
-      verificationStatus: statusFor(),
-      isVerified: isVerifiedFlag,
+      verificationStatus,
+      isVerified: verificationStatus === "verified",
+      rejectionReason: review?.rejectionReason || undefined,
       uploadedAt,
-      verifiedAt,
+      verifiedAt:
+        review?.reviewedAt ||
+        (verificationStatus === "verified" ? kyc.verifiedAt : undefined) ||
+        undefined,
     });
   };
 
   push(
     "driving_license",
+    "drivingLicense",
     kyc.drivingLicense?.frontImage,
     kyc.drivingLicense?.expiryDate,
   );
-  push("rc_book", kyc.vehicleRc?.image);
-  push("aadhar", kyc.aadhaar?.frontImage);
-  push("pan", kyc.pan?.frontImage);
+  push("rc_book", "vehicleRc", kyc.vehicleRc?.image);
+  push("aadhar", "aadhaar", kyc.aadhaar?.frontImage);
+  push("pan", "pan", kyc.pan?.frontImage);
   return docs;
 };
 
@@ -628,6 +648,122 @@ export const getDriverDocuments = async (req: Request, res: Response) => {
   }
 
   res.locals.data = { documents: kyc };
+};
+
+/** The document slots a driver actually submits, and where each one lives. */
+const KYC_DOCUMENT_TYPES = [
+  "aadhaar",
+  "pan",
+  "drivingLicense",
+  "selfie",
+  "vehicleRc",
+] as const;
+
+/** The admin UI's document ids -> the KYC record's field names. */
+const DOCUMENT_TYPE_ALIASES: Record<string, string> = {
+  driving_license: "drivingLicense",
+  drivingLicense: "drivingLicense",
+  rc_book: "vehicleRc",
+  vehicleRc: "vehicleRc",
+  aadhar: "aadhaar",
+  aadhaar: "aadhaar",
+  pan: "pan",
+  selfie: "selfie",
+};
+
+/** True when the driver has actually uploaded something for this slot. */
+const isDocumentSubmitted = (kyc: any, docType: string): boolean => {
+  const v = kyc?.[docType];
+  if (!v) return false;
+  if (typeof v === "string") return v.trim().length > 0;
+  // Object-shaped documents count as submitted once any image is present.
+  return Boolean(v.frontImage || v.backImage || v.image);
+};
+
+/**
+ * Approve or reject ONE document.
+ *
+ * Previously the admin's per-document "Approve" had nowhere granular to write:
+ * the KYC record carried a single `isVerified` flag for the whole set and every
+ * document's status in the UI was derived from `driver.status`. So approving a
+ * licence silently marked the Aadhaar, PAN, selfie and RC verified too.
+ *
+ * This writes only the document named in the URL. `isVerified` becomes a
+ * derived roll-up — true only once every SUBMITTED document is VERIFIED — and
+ * approving documents never by itself activates the driver's account; that
+ * stays the separate, explicit verifyDriver action.
+ */
+export const verifyDriverDocument = async (req: Request, res: Response) => {
+  const { id, docType } = req.params;
+  const { action, reason } = req.body || {};
+
+  // The admin page identifies documents as driving_license / rc_book / aadhar,
+  // while the KYC record stores them as drivingLicense / vehicleRc / aadhaar.
+  // Accept either spelling rather than 400-ing on the admin's own vocabulary.
+  const field = DOCUMENT_TYPE_ALIASES[docType] ?? docType;
+
+  if (!KYC_DOCUMENT_TYPES.includes(field as any)) {
+    return res.status(400).json({
+      success: false,
+      message: `Unknown document "${docType}". Expected one of: ${Object.keys(DOCUMENT_TYPE_ALIASES).join(", ")}.`,
+    });
+  }
+
+  if (action !== "approve" && action !== "reject") {
+    return res.status(400).json({
+      success: false,
+      message: 'action must be "approve" or "reject".',
+    });
+  }
+
+  const kyc: any = await DriverKYC.findOne({ driverId: id });
+  if (!kyc) {
+    return res.status(404).json({
+      success: false,
+      message: "Documents not found",
+    });
+  }
+
+  if (!isDocumentSubmitted(kyc, field)) {
+    return res.status(400).json({
+      success: false,
+      message: `The driver has not uploaded a ${docType} yet.`,
+    });
+  }
+
+  kyc.documentStatus = kyc.documentStatus || {};
+  kyc.documentStatus[field] = {
+    status: action === "approve" ? "VERIFIED" : "REJECTED",
+    reviewedAt: new Date(),
+    reviewedBy: (req as any).admin?._id,
+    rejectionReason: action === "reject" ? reason || "" : undefined,
+  };
+
+  // Roll-up across the documents this driver actually submitted. A slot they
+  // never uploaded must not block verification, and must not count as passed.
+  const submitted = KYC_DOCUMENT_TYPES.filter((t) => isDocumentSubmitted(kyc, t));
+  const allVerified =
+    submitted.length > 0 &&
+    submitted.every((t) => kyc.documentStatus?.[t]?.status === "VERIFIED");
+
+  kyc.isVerified = allVerified;
+  if (allVerified) kyc.verifiedAt = new Date();
+
+  kyc.markModified("documentStatus");
+  await kyc.save();
+
+  res.locals.data = {
+    docType,
+    status: kyc.documentStatus[field].status,
+    documentStatus: kyc.documentStatus,
+    // Whether every submitted document has now passed. The driver's account is
+    // still activated separately, so the UI can prompt for that next.
+    allDocumentsVerified: allVerified,
+  };
+  res.locals.message =
+    action === "approve"
+      ? `${docType} approved.`
+      : `${docType} rejected.`;
 };
 
 /**

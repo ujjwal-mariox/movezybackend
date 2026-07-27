@@ -344,6 +344,16 @@ adminRouter.get(
   ResponseMiddleware,
 );
 
+// Approve/reject a SINGLE document. Needs the same permission as approving a
+// driver, since it is part of the same review decision.
+adminRouter.put(
+  "/drivers/:id/documents/:docType/verify",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.DRIVERS_VERIFY),
+  ErrorHandlerMiddleware(DriverController.verifyDriverDocument),
+  ResponseMiddleware,
+);
+
 adminRouter.put(
   "/drivers/:id",
   verifyAdminToken,
@@ -542,6 +552,23 @@ adminRouter.put(
 );
 
 // ============ CONFIG ============
+// Support number both apps dial. Blank = call buttons hidden.
+adminRouter.get(
+  "/config/support-contact",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SETTINGS_VIEW),
+  ErrorHandlerMiddleware(ConfigController.getSupportContact),
+  ResponseMiddleware,
+);
+
+adminRouter.put(
+  "/config/support-contact",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SETTINGS_UPDATE),
+  ErrorHandlerMiddleware(ConfigController.updateSupportContact),
+  ResponseMiddleware,
+);
+
 adminRouter.get(
   "/config/fare",
   verifyAdminToken,
