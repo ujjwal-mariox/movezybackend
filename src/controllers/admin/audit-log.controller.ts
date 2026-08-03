@@ -36,6 +36,69 @@ export const createAuditEntry = async (data: {
   }
 };
 
+/**
+ * The acting admin, as recorded on every audit row. adminName/adminEmail/module
+ * /description are all `required` on the schema, so an entry that omits them
+ * throws a ValidationError and the row is silently lost.
+ */
+export const auditActor = (req: Request) => {
+  const a = (req as any).admin || {};
+  return {
+    adminId: (req as any).adminId || String(a._id || ""),
+    adminName: a.fullName || a.name || "Admin",
+    adminEmail: a.email || "",
+    adminRole: a.roleName || a.role,
+  };
+};
+
+/**
+ * Write an audit row for the admin behind `req`. Thin wrapper over
+ * createAuditEntry that fills in the actor, IP and user agent, so callers only
+ * describe WHAT changed. Never throws — createAuditEntry swallows its own
+ * errors, so an audit failure can't fail the mutation it describes.
+ */
+export const auditFromRequest = (
+  req: Request,
+  data: {
+    action: string;
+    module: string;
+    targetId?: string;
+    targetType?: string;
+    description: string;
+    changes?: { field: string; oldValue: any; newValue: any }[];
+    before?: Record<string, any>;
+    after?: Record<string, any>;
+    impactLevel?: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
+    metadata?: Record<string, any>;
+  },
+) =>
+  createAuditEntry({
+    ...auditActor(req),
+    ...data,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+/**
+ * Field-level diff between the document as it was and the values just written.
+ * Only keys present in `after` are compared, and only genuine changes are
+ * returned — so an audit row shows what the admin actually altered.
+ */
+export const diffFields = (
+  before: Record<string, any> | null | undefined,
+  after: Record<string, any> | null | undefined,
+) => {
+  const changes: { field: string; oldValue: any; newValue: any }[] = [];
+  if (!after) return changes;
+  for (const [field, newValue] of Object.entries(after)) {
+    const oldValue = before ? (before as any)[field] : undefined;
+    if (JSON.stringify(oldValue) !== JSON.stringify(newValue)) {
+      changes.push({ field, oldValue, newValue });
+    }
+  }
+  return changes;
+};
+
 // GET /admin/audit-logs
 export const getAuditLogs = async (req: Request, res: Response) => {
   const {

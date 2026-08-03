@@ -6,6 +6,10 @@ import {
 } from "../models/enterprise.model";
 import User from "../models/Users";
 import Booking from "../models/booking.model";
+import { CreditHistory } from "../models/credit-history.model";
+import * as FareService from "./fare.service";
+import { getDistanceForLegs } from "./routing.service";
+import { generateBookingNumber } from "./booking-number.service";
 
 /**
  * Create enterprise account request
@@ -259,8 +263,37 @@ export const getEnterpriseUsers = async (
   };
 };
 
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
 /**
- * Create booking using enterprise credit
+ * A caller-fixable failure. Carries `status` so the controller answers 400
+ * instead of reporting a client mistake as a 500 server error.
+ */
+const badRequest = (message: string) =>
+  Object.assign(new Error(message), { status: 400 });
+
+/** A location is usable only with real coordinates. */
+const hasCoords = (loc: any) =>
+  loc &&
+  Number.isFinite(Number(loc.lat)) &&
+  Number.isFinite(Number(loc.lng)) &&
+  !(Number(loc.lat) === 0 && Number(loc.lng) === 0);
+
+/**
+ * Create booking using enterprise credit.
+ *
+ * Everything about money here is server-derived. This used to take the price
+ * straight from the request body — `bookingAmount = bookingData.finalFare ||
+ * bookingData.fare` and then `new Booking({ ...bookingData })` — so an
+ * enterprise user could book a real trip for ₹1 and Finance would report ₹1, and
+ * the booking's subtotal/baseFare/distanceKm were all whatever the client posted.
+ * It also omitted `bookingNumber`, which carries a non-sparse unique index, so
+ * the second credit booking ever created failed with E11000.
+ *
+ * Add-ons, promo codes and coin redemption are NOT supported on this path: they
+ * need the resolvers in booking.controller to be priced from the database, and
+ * accepting them here would either mis-price the trip or drop them silently. The
+ * request is rejected instead of quietly ignoring them.
  */
 export const createCreditBooking = async (
   enterpriseId: Types.ObjectId,
@@ -276,46 +309,239 @@ export const createCreditBooking = async (
   });
 
   if (!enterpriseUser) {
-    throw new Error("User does not belong to this enterprise");
+    throw badRequest("User does not belong to this enterprise");
   }
 
   // Get enterprise
   const enterprise = await Enterprise.findById(enterpriseId);
   if (!enterprise || enterprise.status !== "APPROVED" || !enterprise.isActive) {
-    throw new Error("Enterprise account is not active");
+    throw badRequest("Enterprise account is not active");
   }
 
-  // Check credit limit
-  const availableCredit = enterprise.creditLimit - enterprise.usedCredit;
-  const bookingAmount = bookingData.finalFare || bookingData.fare;
+  const pickup = bookingData.pickup || bookingData.pickupLocation;
+  const drop = bookingData.drop || bookingData.dropLocation;
+  const vehicleTypeId = bookingData.vehicleTypeId;
 
-  if (availableCredit < bookingAmount) {
-    throw new Error("Insufficient enterprise credit");
+  if (!hasCoords(pickup) || !hasCoords(drop) || !vehicleTypeId) {
+    throw badRequest(
+      "pickup and drop coordinates and vehicleTypeId are required",
+    );
   }
 
-  // Apply enterprise discount
-  const discountAmount = (bookingAmount * enterprise.discountPercentage) / 100;
-  const finalAmount = bookingAmount - discountAmount;
+  if (
+    (Array.isArray(bookingData.addons) && bookingData.addons.length > 0) ||
+    bookingData.promoCode ||
+    bookingData.useCoins
+  ) {
+    throw badRequest(
+      "Add-on services, promo codes and coins are not supported on enterprise credit bookings yet",
+    );
+  }
 
-  // Create booking
-  const booking = new Booking({
-    ...bookingData,
-    enterpriseId,
-    enterpriseDiscount: discountAmount,
-    finalFare: finalAmount,
-    paymentMethod: "ENTERPRISE_CREDIT",
-    paymentStatus: "PENDING", // Will be settled later
+  const stops = (Array.isArray(bookingData.stops) ? bookingData.stops : [])
+    .map((s: any) => ({
+      address: s?.address || "Stop",
+      lat: Number(s?.location?.lat ?? s?.lat),
+      lng: Number(s?.location?.lng ?? s?.lng),
+      contactName: s?.contactName,
+      contactPhone: s?.contactPhone,
+    }))
+    .filter(hasCoords);
+
+  // Server-authoritative road distance, exactly as createBooking resolves it.
+  const route = await getDistanceForLegs([pickup, ...stops, drop]);
+  if (!route) {
+    throw badRequest(
+      "Could not work out a route for this trip. Please check the pickup and drop locations.",
+    );
+  }
+
+  const serviceType =
+    bookingData.serviceType === "OUTSTATION" ? "OUTSTATION" : "WITHIN_CITY";
+
+  const fareBreakdown = await FareService.calculateFare({
+    vehicleTypeId,
+    distanceKm: route.distanceKm,
+    durationMin: route.durationMin,
+    serviceType,
+    stops: stops.length,
   });
-  await booking.save({ session });
 
-  // Update used credit
-  await Enterprise.findByIdAndUpdate(
-    enterpriseId,
-    { $inc: { usedCredit: finalAmount } },
-    { session },
+  // The enterprise's negotiated discount comes off the priced fare.
+  const discountAmount = round2(
+    (fareBreakdown.finalFare * enterprise.discountPercentage) / 100,
   );
+  const finalAmount = round2(fareBreakdown.finalFare - discountAmount);
 
-  return booking;
+  // One conditional update instead of read-then-$inc. The old code compared
+  // creditLimit - usedCredit in application memory and incremented in a separate
+  // write, so two concurrent bookings both passed the check and drove usedCredit
+  // past the limit. $expr does the comparison inside the same atomic update.
+  const claimed = await Enterprise.findOneAndUpdate(
+    {
+      _id: enterpriseId,
+      status: "APPROVED",
+      isActive: true,
+      $expr: { $lte: [{ $add: ["$usedCredit", finalAmount] }, "$creditLimit"] },
+    },
+    { $inc: { usedCredit: finalAmount } },
+    { new: true, session },
+  );
+  if (!claimed) {
+    throw badRequest("Insufficient enterprise credit");
+  }
+
+  const creditBefore = round2(claimed.usedCredit - finalAmount);
+
+  try {
+    const booking = new Booking({
+      bookingNumber: await generateBookingNumber(),
+      userId,
+      enterpriseId,
+      vehicleTypeId,
+      serviceType,
+      pickup: {
+        address: pickup.address || "Pickup Location",
+        lat: Number(pickup.lat),
+        lng: Number(pickup.lng),
+      },
+      drop: {
+        address: drop.address || "Drop Location",
+        lat: Number(drop.lat),
+        lng: Number(drop.lng),
+      },
+      stops,
+      goodsType:
+        bookingData.goodsType === "BUSINESS" ? "BUSINESS" : "PERSONAL",
+      goodsDescription: bookingData.goodsDescription,
+      goodsQuantity: bookingData.goodsQuantity,
+      // Money: every figure below is the fare service's, never the client's.
+      distanceKm: route.distanceKm,
+      durationMin: route.durationMin,
+      baseFare: fareBreakdown.baseFare,
+      distanceCharge: fareBreakdown.distanceCharge,
+      timeCharge: fareBreakdown.timeCharge || 0,
+      surgeFare: fareBreakdown.surgeCharge || 0,
+      surgeMultiplier: fareBreakdown.surgeMultiplier || 1,
+      stopCharges: fareBreakdown.stopCharges || 0,
+      gstAmount: fareBreakdown.gstAmount || 0,
+      gstPercentage: fareBreakdown.gstPercentage || 5,
+      subtotal: fareBreakdown.subtotal,
+      enterpriseDiscount: discountAmount,
+      totalDiscount: discountAmount,
+      fare: finalAmount,
+      finalFare: finalAmount,
+      // The driver flow is gated on these, so a credit booking that lacks them
+      // can never be picked up or completed.
+      otp: String(Math.floor(1000 + Math.random() * 9000)),
+      deliveryOtp: String(Math.floor(1000 + Math.random() * 9000)),
+      notes: bookingData.notes,
+      receiverName: bookingData.receiverName,
+      receiverPhone: bookingData.receiverPhone,
+      status: "SEARCHING",
+      paymentMethod: "ENTERPRISE_CREDIT",
+      paymentStatus: "PENDING", // Settled against the enterprise invoice later
+    });
+    await booking.save({ session });
+
+    // Ledger row for the credit consumed. usedCredit was previously moved with a
+    // bare $inc and no history at all, so the admin's credit screens could not be
+    // reconciled against anything.
+    await CreditHistory.create(
+      [
+        {
+          enterpriseId,
+          type: "CREDIT_USED",
+          amount: finalAmount,
+          balanceBefore: creditBefore,
+          balanceAfter: claimed.usedCredit,
+          bookingId: booking._id,
+          reason: `Booking ${booking.bookingNumber} on enterprise credit`,
+          performedByType: "CUSTOMER",
+        },
+      ],
+      { session },
+    );
+
+    return booking;
+  } catch (err) {
+    // Release the credit we just claimed — otherwise a failed booking would
+    // permanently consume the enterprise's limit.
+    await Enterprise.updateOne(
+      { _id: enterpriseId },
+      { $inc: { usedCredit: -finalAmount } },
+      { session },
+    );
+    throw err;
+  }
+};
+
+/**
+ * Give an enterprise its credit back when a credit booking is cancelled.
+ *
+ * Nothing decremented usedCredit anywhere in the codebase, so an enterprise's
+ * utilisation only ever ratcheted upwards and the admin's only remedy was a
+ * manual CREDIT_REPAID adjustment. Returns the amount released (0 if nothing to
+ * release), and never throws: releasing credit must not fail a cancellation.
+ */
+export const releaseCreditForBooking = async (
+  booking: any,
+  reason: string,
+  releaseAmount?: number,
+): Promise<number> => {
+  try {
+    if (
+      !booking?.enterpriseId ||
+      booking.paymentMethod !== "ENTERPRISE_CREDIT" ||
+      booking.paymentStatus === "PAID"
+    ) {
+      return 0;
+    }
+
+    // A credit booking draws the whole fare up-front, so releasing all of it on
+    // cancellation would charge an enterprise nothing for a trip a cash
+    // customer pays in full — the stage ceilings refund 0% once the goods are
+    // aboard. Callers that know the cancellation stage pass the refundable
+    // slice; whatever is not released stays on usedCredit as a real charge.
+    const fare = round2(Number(booking.finalFare) || 0);
+    const amount =
+      releaseAmount === undefined
+        ? fare
+        : round2(Math.max(0, Math.min(fare, Number(releaseAmount) || 0)));
+    if (amount <= 0) return 0;
+
+    // Already released? One CREDIT_REPAID row per booking is enough.
+    const existing = await CreditHistory.findOne({
+      bookingId: booking._id,
+      type: "CREDIT_REPAID",
+    });
+    if (existing) return 0;
+
+    // Never take usedCredit below zero, even if the booking's fare changed after
+    // the credit was claimed.
+    const updated = await Enterprise.findOneAndUpdate(
+      { _id: booking.enterpriseId, usedCredit: { $gte: amount } },
+      { $inc: { usedCredit: -amount } },
+      { new: true },
+    );
+    if (!updated) return 0;
+
+    await CreditHistory.create({
+      enterpriseId: booking.enterpriseId,
+      type: "CREDIT_REPAID",
+      amount,
+      balanceBefore: round2(updated.usedCredit + amount),
+      balanceAfter: updated.usedCredit,
+      bookingId: booking._id,
+      reason,
+      performedByType: "SYSTEM",
+    });
+
+    return amount;
+  } catch (err) {
+    console.error("Failed to release enterprise credit:", err);
+    return 0;
+  }
 };
 
 /**

@@ -6,19 +6,11 @@ import * as UserAddressService from "../services/address.service";
 import fileUploadService from "../utils/s3";
 import { Express } from "express";
 
-export const updateDeviceToken = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-) => {
-  const { userId, deviceToken, deviceType } = req.body;
-
-  await UserService.updateUsers(userId, { deviceToken, deviceType });
-
-  req.msg = "success";
-  req.rData = {};
-  next();
-};
+// `updateDeviceToken` used to live here: it wrote `deviceToken`/`deviceType`,
+// two fields that were declared on IUser but never on the User schema, so
+// strict mode dropped both and nothing was ever stored. It was also not wired to
+// any route, and push tokens are stored through PUT /notifications/fcm-token
+// (User.fcmToken). Removed rather than left looking live.
 
 export const getDetails = async (
   req: Request,

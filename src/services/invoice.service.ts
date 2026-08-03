@@ -88,6 +88,17 @@ export const generateInvoice = async (
 
   const invoiceNumber = await generateInvoiceNumber();
 
+  // Payment term. Enterprise credit is the only billing arrangement in the
+  // system with one (Enterprise.paymentTerms, in days, admin-owned). Retail
+  // invoices are settled at the trip, so they get no dueDate and Finance never
+  // reports them overdue — see IInvoice.dueDate.
+  const enterprise = booking.enterpriseId as any;
+  const paymentTermDays = Number(enterprise?.paymentTerms);
+  const dueDate =
+    Number.isFinite(paymentTermDays) && paymentTermDays > 0
+      ? new Date(Date.now() + paymentTermDays * 24 * 60 * 60 * 1000)
+      : undefined;
+
   const invoice = await Invoice.create({
     invoiceNumber,
     bookingId,
@@ -125,6 +136,7 @@ export const generateInvoice = async (
     companyGstin,
 
     status: booking.paymentStatus === "PAID" ? "PAID" : "GENERATED",
+    dueDate,
     paidAt: booking.paymentStatus === "PAID" ? new Date() : undefined,
   });
 

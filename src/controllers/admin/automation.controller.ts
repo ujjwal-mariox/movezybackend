@@ -21,7 +21,7 @@ export const getAllRules = async (req: Request, res: Response) => {
   if (triggerType) filter["trigger.type"] = triggerType;
 
   const skip = (Number(page) - 1) * Number(limit);
-  const [rules, total] = await Promise.all([
+  const [rules, total, totals] = await Promise.all([
     AutomationRule.find(filter)
       .sort({ createdAt: -1 })
       .skip(skip)
@@ -29,6 +29,46 @@ export const getAllRules = async (req: Request, res: Response) => {
       .populate("createdBy", "fullName email")
       .lean(),
     AutomationRule.countDocuments(filter),
+    // Health figures across every rule matching the filter, not just the
+    // returned page. The admin's health tiles could only sum the page they had,
+    // so they were labelled "(this page)" and a second page of rules changed
+    // what "3 active" meant. Only cancellation_rate, low_rating_consecutive and
+    // driver_idle are evaluated by the engine, so `activeEvaluated` is the count
+    // that actually does anything — the rest are active-but-inert.
+    AutomationRule.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: null,
+          totalRules: { $sum: 1 },
+          activeRules: { $sum: { $cond: ["$isActive", 1, 0] } },
+          activeEvaluated: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    "$isActive",
+                    {
+                      $in: [
+                        "$trigger.type",
+                        [
+                          "cancellation_rate",
+                          "low_rating_consecutive",
+                          "driver_idle",
+                        ],
+                      ],
+                    },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+          totalTriggerCount: { $sum: { $ifNull: ["$triggerCount", 0] } },
+        },
+      },
+    ]),
   ]);
 
   res.locals.data = {
@@ -38,6 +78,12 @@ export const getAllRules = async (req: Request, res: Response) => {
       page: Number(page),
       limit: Number(limit),
       pages: Math.ceil(total / Number(limit)),
+    },
+    totals: {
+      totalRules: totals[0]?.totalRules || 0,
+      activeRules: totals[0]?.activeRules || 0,
+      activeEvaluated: totals[0]?.activeEvaluated || 0,
+      totalTriggerCount: totals[0]?.totalTriggerCount || 0,
     },
   };
 };
@@ -120,6 +166,11 @@ export const toggleRule = async (req: Request, res: Response) => {
 
 // GET /admin/automation/trigger-types
 export const getTriggerTypes = async (_req: Request, res: Response) => {
+  // `implemented` says whether automation-engine.service.ts actually evaluates
+  // the trigger. Only three branches exist there; the rest are acknowledged-only
+  // and never match anything, so a rule built on one silently never fires. The
+  // admin reads this flag to mark those, instead of keeping its own copy of
+  // which triggers work.
   res.locals.data = [
     {
       type: "cancellation_rate",
@@ -129,6 +180,7 @@ export const getTriggerTypes = async (_req: Request, res: Response) => {
       defaultOperator: "gt",
       defaultThreshold: 30,
       defaultTimeWindowDays: 7,
+      implemented: true,
     },
     {
       type: "cod_collection_delay",
@@ -137,6 +189,7 @@ export const getTriggerTypes = async (_req: Request, res: Response) => {
       defaultMetric: "cod_delay_hours",
       defaultOperator: "gt",
       defaultThreshold: 48,
+      implemented: false,
     },
     {
       type: "low_rating_consecutive",
@@ -146,14 +199,21 @@ export const getTriggerTypes = async (_req: Request, res: Response) => {
       defaultOperator: "lt",
       defaultThreshold: 3,
       defaultConsecutiveCount: 5,
+      implemented: true,
     },
     {
       type: "driver_idle",
       label: "Driver Idle",
-      description: "Driver idle for specified days while marked online",
-      defaultMetric: "idle_days",
+      // The engine measures MINUTES since the last location update
+      // (automation-engine.service.ts). This advertised days, so a threshold of
+      // 7 meant "7 minutes" and nudged every driver whose app had been
+      // backgrounded briefly.
+      description:
+        "Driver idle (no GPS update) for the specified minutes while marked online",
+      defaultMetric: "idle_minutes",
       defaultOperator: "gt",
-      defaultThreshold: 7,
+      defaultThreshold: 60,
+      implemented: true,
     },
     {
       type: "order_spike",
@@ -163,6 +223,7 @@ export const getTriggerTypes = async (_req: Request, res: Response) => {
       defaultOperator: "gt",
       defaultThreshold: 150,
       defaultTimeWindowDays: 1,
+      implemented: false,
     },
     {
       type: "sos_spike",
@@ -172,6 +233,7 @@ export const getTriggerTypes = async (_req: Request, res: Response) => {
       defaultOperator: "gt",
       defaultThreshold: 5,
       defaultTimeWindowDays: 1,
+      implemented: false,
     },
     {
       type: "revenue_drop",
@@ -181,6 +243,7 @@ export const getTriggerTypes = async (_req: Request, res: Response) => {
       defaultOperator: "lt",
       defaultThreshold: -20,
       defaultTimeWindowDays: 7,
+      implemented: false,
     },
   ];
 };

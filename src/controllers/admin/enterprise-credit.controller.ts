@@ -272,16 +272,23 @@ export const getOverdueEnterprises = async (req: Request, res: Response) => {
     const overdueEnterprises = await invoicesCollection
       .aggregate([
         {
+          // Unpaid enterprise invoices past their agreed payment term.
+          // "SENT"/"OVERDUE" are not in the Invoice status enum, so only
+          // GENERATED can match. `dueDate` is written at generation from
+          // Enterprise.paymentTerms (invoice.service.generateInvoice) — before
+          // that field existed this filter matched nothing.
           $match: {
             enterpriseId: { $exists: true },
-            status: { $in: ["GENERATED", "SENT", "OVERDUE"] },
+            status: { $in: ["GENERATED"] },
             dueDate: { $lt: new Date() },
           },
         },
         {
           $group: {
+            // The invoice total is `grandTotal`; `amount` is not a path on the
+            // schema, so this summed to ₹0 for every enterprise.
             _id: "$enterpriseId",
-            overdueAmount: { $sum: "$amount" },
+            overdueAmount: { $sum: { $ifNull: ["$grandTotal", 0] } },
             invoiceCount: { $sum: 1 },
             oldestDueDate: { $min: "$dueDate" },
           },

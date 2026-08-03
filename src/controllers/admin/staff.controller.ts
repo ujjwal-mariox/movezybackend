@@ -8,6 +8,7 @@ import {
   SIDEBAR_MODULES,
   DEFAULT_ROLES,
 } from "../../models/role.model";
+import { auditFromRequest, diffFields } from "./audit-log.controller";
 
 // ==================== STAFF MANAGEMENT ====================
 
@@ -355,13 +356,52 @@ export const resetStaffPassword = async (req: Request, res: Response) => {
     });
   }
 
-  const staff = await Admin.findOne({ _id: id, isDeleted: false });
+  const staff = await Admin.findOne({ _id: id, isDeleted: false }).populate(
+    "roleId",
+    "name roleName",
+  );
 
   if (!staff) {
     return res.status(404).json({
       success: false,
       message: "Staff member not found",
     });
+  }
+
+  // Account-takeover guard. This route only required staff:update, so any admin
+  // holding it could reset the SUPER ADMIN's password and then sign in as them.
+  // A Super Admin's password may only be changed by a Super Admin (and, in
+  // practice, by that admin themselves via forgot-password).
+  const targetRole = String(
+    (staff as any)?.roleId?.roleName ??
+      (staff as any)?.roleId?.name ??
+      (staff as any)?.roleName ??
+      "",
+  ).toUpperCase();
+  const isTargetSuperAdmin =
+    targetRole.includes("SUPER") ||
+    (Array.isArray((staff as any)?.permissions) &&
+      (staff as any).permissions.includes("all"));
+
+  if (isTargetSuperAdmin) {
+    const actorRole = String(
+      (req as any).admin?.roleId?.roleName ??
+        (req as any).admin?.roleId?.name ??
+        (req as any).admin?.roleName ??
+        "",
+    ).toUpperCase();
+    const actorIsSuperAdmin =
+      actorRole.includes("SUPER") ||
+      (Array.isArray((req as any).admin?.permissions) &&
+        (req as any).admin.permissions.includes("all"));
+
+    if (!actorIsSuperAdmin) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Only a Super Admin can reset a Super Admin's password.",
+      });
+    }
   }
 
   const hashedPassword = await bcrypt.hash(newPassword, 12);
@@ -477,6 +517,15 @@ export const createRole = async (req: Request, res: Response) => {
     createdBy: req.adminId,
   });
 
+  await auditFromRequest(req, {
+    action: "CREATE",
+    module: "roles",
+    targetId: String(newRole._id),
+    targetType: "Role",
+    description: `Created role "${newRole.name}" with ${newRole.permissions.length} permission(s)`,
+    after: { name: newRole.name, permissions: newRole.permissions },
+  });
+
   res.locals.data = {
     message: "Role created successfully",
     role: newRole,
@@ -547,8 +596,10 @@ export const updateRole = async (req: Request, res: Response) => {
   });
 
   // Update permissions for all staff with this role
+  let affectedStaff = 0;
   if (permissions) {
     const staffWithRole = await Admin.find({ roleId: id, isDeleted: false });
+    affectedStaff = staffWithRole.length;
 
     for (const staff of staffWithRole) {
       const allPermissions = [
@@ -557,6 +608,24 @@ export const updateRole = async (req: Request, res: Response) => {
       await Admin.findByIdAndUpdate(staff._id, { permissions: allPermissions });
     }
   }
+
+  // A permission grant is the highest-impact change in the panel and left no
+  // record of who granted what. `role` was read before the write above, so it
+  // still holds the pre-change permission list.
+  await auditFromRequest(req, {
+    action: "CHANGE_ROLE",
+    module: "roles",
+    targetId: String(id),
+    targetType: "Role",
+    description: `Updated role "${role.name}"${
+      permissions ? ` — ${affectedStaff} staff member(s) re-permissioned` : ""
+    }`,
+    changes: diffFields(
+      { name: role.name, description: role.description, permissions: role.permissions },
+      // `updatedBy` is bookkeeping, not a change the admin made.
+      { ...updateData, updatedBy: undefined },
+    ),
+  });
 
   res.locals.data = {
     message: "Role updated successfully",
@@ -600,6 +669,15 @@ export const deleteRole = async (req: Request, res: Response) => {
   }
 
   await Role.findByIdAndUpdate(id, { isActive: false });
+
+  await auditFromRequest(req, {
+    action: "DELETE",
+    module: "roles",
+    targetId: String(id),
+    targetType: "Role",
+    description: `Deleted role "${role.name}"`,
+    before: { name: role.name, permissions: role.permissions },
+  });
 
   res.locals.data = {
     message: "Role deleted successfully",

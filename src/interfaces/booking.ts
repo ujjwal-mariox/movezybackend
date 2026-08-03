@@ -29,7 +29,9 @@ export type PaymentStatus =
   | "REFUNDED"
   | "PARTIALLY_REFUNDED";
 
-export type CancelledBy = "USER" | "DRIVER" | "SYSTEM";
+// "ADMIN" is distinct from "SYSTEM": a staff decision rather than an automatic
+// cancellation (no driver found, payment expiry).
+export type CancelledBy = "USER" | "DRIVER" | "SYSTEM" | "ADMIN";
 export type ServiceType = "WITHIN_CITY" | "OUTSTATION";
 export type GoodsType = "BUSINESS" | "PERSONAL";
 export type LoadingUnloadingType = "LOADING" | "UNLOADING" | "BOTH" | "NONE";

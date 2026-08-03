@@ -19,10 +19,12 @@ import * as InvoiceService from "../services/invoice.service";
 import * as BookingDispatchService from "../services/booking-dispatch.service";
 import * as PaymentService from "../services/payment.service";
 import * as NotificationService from "../services/notification.service";
+import * as EnterpriseService from "../services/enterprise.service";
 import { emitToUser } from "../utils/socket.util";
 import UserGST from "../models/user-gst.model";
 import { cache } from "../utils/redis.util";
 import { getDistanceForLegs } from "../services/routing.service";
+import { generateBookingNumber } from "../services/booking-number.service";
 import { Types } from "mongoose";
 
 /** Guards against a client declaring a 10,000-floor building. */
@@ -339,6 +341,19 @@ export const createBooking = async (req: Request, res: Response) => {
       });
     }
 
+    // ENTERPRISE_CREDIT is a valid value on the schema's paymentMethod enum, so
+    // a client could book here and label the trip as billed to an enterprise —
+    // this path never touches Enterprise.usedCredit and never checks a limit, so
+    // the trip would be recorded against a credit account that was never
+    // charged. Credit bookings go through POST /enterprise/bookings/credit.
+    if (paymentMethod === "ENTERPRISE_CREDIT") {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Enterprise credit bookings must be created through the enterprise credit endpoint.",
+      });
+    }
+
     // Server-authoritative road distance, matching getFareEstimate exactly —
     // both hit the same cached route, so the booked fare can never drift from
     // the quote the customer accepted. Client figures remain only as the
@@ -428,26 +443,11 @@ export const createBooking = async (req: Request, res: Response) => {
       }
     }
 
-    // Generate booking number atomically, syncing with existing DB records
-    const seqKey = "booking:sequence";
-    const exists = await cache.exists(seqKey);
-    if (!exists) {
-      // Initialize counter from the highest existing booking number in DB
-      const lastBooking = await Booking.findOne({}, { bookingNumber: 1 })
-        .sort({ createdAt: -1 })
-        .lean();
-      let currentMax = 0;
-      if (lastBooking?.bookingNumber) {
-        const match = lastBooking.bookingNumber.match(/\d+/);
-        if (match) currentMax = parseInt(match[0], 10);
-      }
-      // Also check total count as fallback
-      const totalCount = await Booking.countDocuments();
-      currentMax = Math.max(currentMax, totalCount);
-      await cache.set(seqKey, currentMax.toString());
-    }
-    const bookingSeq = await cache.incr(seqKey);
-    const bookingNumber = `MZ${bookingSeq.toString().padStart(4, "0")}`;
+    // Generate booking number atomically, syncing with existing DB records.
+    // Extracted so every path that creates a Booking uses the same sequence —
+    // bookingNumber has a non-sparse unique index, so a path that omits it
+    // fails with E11000 on the second such booking.
+    const bookingNumber = await generateBookingNumber();
 
     // Look up user's saved GSTIN (if any)
     let userGstin: string | undefined;
@@ -483,7 +483,14 @@ export const createBooking = async (req: Request, res: Response) => {
     // invoice built from it) disagreed with the money taken: a 2% Insurance
     // add-on on a ₹5,000 order was recorded as ₹2 instead of ₹100.
     const addonTotal = fareBreakdown.addonCharges || 0;
-    const subtotalAmount = fareBreakdown.baseFare + fareBreakdown.distanceCharge + (fareBreakdown.timeCharge || 0) + (fareBreakdown.surgeCharge || 0) + addonTotal;
+    // Store the fare service's OWN subtotal, not a re-derived sum.
+    // Re-adding the components here dropped stopCharges, tollCharges and the
+    // minimum-fare floor, so the stored subtotal disagreed with the gstAmount
+    // and finalFare computed from it (subtotal + gst != finalFare on any
+    // booking with stops). It is also the settlement base at completion
+    // (driver.controller completeTrip), so commission and driverEarnings were
+    // short by 20%/80% of every stop charge and every minimum-fare top-up.
+    const subtotalAmount = fareBreakdown.subtotal;
     const totalDiscount = promoDiscount + coinDiscount;
     const finalFare = Math.max(totalAmount, 0);
 
@@ -1075,12 +1082,11 @@ export const addStop = async (req: Request, res: Response) => {
     booking.addonTotal = addonTotal;
     booking.gstAmount = fareBreakdown.gstAmount || 0;
     booking.gstPercentage = fareBreakdown.gstPercentage || 5;
-    booking.subtotal =
-      fareBreakdown.baseFare +
-      fareBreakdown.distanceCharge +
-      (fareBreakdown.timeCharge || 0) +
-      (fareBreakdown.surgeCharge || 0) +
-      addonTotal;
+    // Same rule as createBooking: the fare service's subtotal is the figure
+    // gstAmount and finalFare were derived from, and the one the driver's
+    // commission/earnings are settled on. Re-deriving it here dropped the new
+    // stop's charge from the settlement base.
+    booking.subtotal = fareBreakdown.subtotal;
     booking.fare = newFinalFare;
     booking.finalFare = newFinalFare;
 
@@ -1226,10 +1232,23 @@ export const cancelScheduledBooking = async (req: Request, res: Response) => {
       });
     }
 
+    // Capture the stage before the status is overwritten — the refund ceiling
+    // is what the stage *was* when the customer hit cancel.
+    const stageCeiling = await refundCeilingForStage(booking.status);
+
     booking.status = "CANCELLED";
     booking.cancelledAt = new Date();
     booking.cancelledBy = "USER";
     await booking.save();
+
+    // Return the credit this booking consumed, capped by the same stage ceiling
+    // a cash refund would honour. A scheduled booking is normally still DRAFT,
+    // so this is usually a full release.
+    await EnterpriseService.releaseCreditForBooking(
+      booking,
+      `Credit released (${stageCeiling}%) — scheduled booking ${booking.bookingNumber} cancelled by customer`,
+      Math.round(((Number(booking.finalFare) || 0) * stageCeiling) / 100),
+    );
 
     res.json({
       success: true,
@@ -1269,6 +1288,37 @@ const refundCeilingForStage = async (status: string): Promise<number> => {
 };
 
 /**
+ * The cancellation fee a reason attaches, in rupees.
+ *
+ * A CancellationReason has carried penaltyType/penaltyValue since the schema was
+ * written, and nothing ever read them — the admin could set a penalty and the
+ * customer was refunded as though it did not exist.
+ *
+ * The fee comes out of the refund and is capped at it. There is no mechanism to
+ * take money from a customer who has not paid (a COD trip cancelled before
+ * payment), so a fee larger than the refundable amount is not "debt owed" — it
+ * is simply uncollectable, and recording it as revenue would be fiction.
+ */
+const cancellationFeeFor = (
+  reason: { penaltyType?: string; penaltyValue?: number } | null,
+  finalFare: number,
+  refundableSlice: number,
+): number => {
+  if (!reason || refundableSlice <= 0) return 0;
+  const value = Number(reason.penaltyValue ?? 0);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+
+  const raw =
+    reason.penaltyType === "FIXED"
+      ? value
+      : reason.penaltyType === "PERCENTAGE"
+        ? (Number(finalFare) || 0) * (value / 100)
+        : 0; // "NONE" or anything unrecognised
+
+  return Math.max(0, Math.min(Math.round(raw), refundableSlice));
+};
+
+/**
  * What cancelling right now would refund — WITHOUT cancelling.
  *
  * The apps offered "Cancel" with no indication of the consequence, so a
@@ -1299,8 +1349,35 @@ export const getCancellationPreview = async (req: Request, res: Response) => {
       "IN_PROGRESS",
     ].includes(booking.status);
 
-    const refundPercentage = await refundCeilingForStage(booking.status);
+    // Same arithmetic cancelBooking uses, so the quoted figure is the figure.
+    // This used to report the bare stage ceiling and ignore the reason
+    // entirely, so a non-refundable reason still previewed a full refund.
+    // The reason is optional: the app asks for a preview before the customer
+    // has picked one, then asks again once they have.
+    const stageCeiling = await refundCeilingForStage(booking.status);
+    let refundPercentage = stageCeiling;
+    let reasonDoc: any = null;
+    const previewReasonId = req.query.cancellationReasonId as string | undefined;
+    if (previewReasonId && Types.ObjectId.isValid(previewReasonId)) {
+      reasonDoc = await CancellationReason.findById(previewReasonId);
+      if (reasonDoc) {
+        refundPercentage =
+          reasonDoc.isRefundable === false
+            ? 0
+            : Math.min(Number(reasonDoc.refundPercentage ?? 100), stageCeiling);
+      }
+    }
     const wasPaid = booking.paymentStatus === "PAID";
+
+    const refundableSlice = Math.round(
+      (booking.finalFare * refundPercentage) / 100,
+    );
+    const cancellationFee = cancellationFeeFor(
+      reasonDoc,
+      booking.finalFare,
+      refundableSlice,
+    );
+    const netRefund = Math.max(0, refundableSlice - cancellationFee);
 
     res.json({
       success: true,
@@ -1311,10 +1388,11 @@ export const getCancellationPreview = async (req: Request, res: Response) => {
         afterPickup: ["PICKED", "IN_PROGRESS"].includes(booking.status),
         wasPaid,
         refundPercentage,
-        refundAmount:
-          wasPaid && refundPercentage > 0
-            ? Math.round((booking.finalFare * refundPercentage) / 100)
-            : 0,
+        // What the reason's penalty withholds, and what is actually returned.
+        // The app shows the fee separately so "you get ₹X back" is never a
+        // figure the customer then fails to receive.
+        cancellationFee,
+        refundAmount: wasPaid ? netRefund : 0,
       },
     });
   } catch (error: any) {
@@ -1355,15 +1433,18 @@ export const cancelBooking = async (req: Request, res: Response) => {
     const stageCeiling = await refundCeilingForStage(booking.status);
 
     let refundPercentage = stageCeiling;
+    let reasonDoc: any = null;
     if (cancellationReasonId) {
-      const reason = await CancellationReason.findById(cancellationReasonId);
-      if (reason) {
-        // The reason can only ever reduce the refund, never raise it past the
-        // stage ceiling.
-        refundPercentage = Math.min(
-          Number(reason.refundPercentage ?? 100),
-          stageCeiling,
-        );
+      reasonDoc = await CancellationReason.findById(cancellationReasonId);
+      if (reasonDoc) {
+        // A reason can only ever reduce the refund, never raise it past the
+        // stage ceiling. `isRefundable: false` means exactly that and was being
+        // ignored — such a reason still paid out its refundPercentage, which
+        // defaults to 100.
+        refundPercentage =
+          reasonDoc.isRefundable === false
+            ? 0
+            : Math.min(Number(reasonDoc.refundPercentage ?? 100), stageCeiling);
       }
       booking.cancellationReasonId = cancellationReasonId;
     }
@@ -1382,21 +1463,49 @@ export const cancelBooking = async (req: Request, res: Response) => {
       success: false,
       message: "No payment to refund",
     };
-    if (wasPaid && refundPercentage > 0) {
-      const refundAmount = Math.round((booking.finalFare * refundPercentage) / 100);
+    const refundableSlice = Math.round(
+      (booking.finalFare * refundPercentage) / 100,
+    );
+
+    // The reason's penalty comes out of that slice. `cancellationFee` has been
+    // on the Booking schema all along and was never written; the admin's
+    // penalty settings had no effect on any refund.
+    const cancellationFee = cancellationFeeFor(
+      reasonDoc,
+      booking.finalFare,
+      refundableSlice,
+    );
+    const netRefund = Math.max(0, refundableSlice - cancellationFee);
+    booking.cancellationFee = cancellationFee;
+
+    if (wasPaid && netRefund > 0) {
       refundResult = await PaymentService.processRefund(
         booking._id as Types.ObjectId,
-        refundAmount,
-        "Booking cancelled by user",
+        netRefund,
+        cancellationFee > 0
+          ? `Booking cancelled by user (₹${cancellationFee} cancellation fee withheld)`
+          : "Booking cancelled by user",
       );
     }
     // Reflect refund outcome on the booking.
     booking.refundStatus = refundResult.success
       ? "PROCESSED"
-      : wasPaid && refundPercentage > 0
+      : wasPaid && netRefund > 0
         ? "PENDING"
         : booking.refundStatus;
     await booking.save();
+
+    // 1b. Give an enterprise back the same slice a cash customer would have
+    // refunded. A credit booking consumed Enterprise.usedCredit when it was
+    // created and nothing ever released it, so utilisation ratcheted to 100%;
+    // but releasing all of it would let an enterprise cancel after pickup for
+    // free while a cash customer pays the whole fare. The unreleased remainder
+    // stays on usedCredit as the cancellation charge.
+    await EnterpriseService.releaseCreditForBooking(
+      booking,
+      `Credit released (${refundPercentage}%${cancellationFee > 0 ? `, ₹${cancellationFee} fee withheld` : ""}) — booking ${booking.bookingNumber} cancelled by customer`,
+      netRefund,
+    );
 
     // 2. Restore any coins the user spent on this booking.
     if (coinsToRestore > 0) {
@@ -1456,10 +1565,12 @@ export const cancelBooking = async (req: Request, res: Response) => {
         // cancellation. It needs the real figures to say anything truthful:
         // what was actually paid, and what is actually coming back.
         wasPaid,
-        refundAmount:
-          wasPaid && refundPercentage > 0
-            ? Math.round((booking.finalFare * refundPercentage) / 100)
-            : 0,
+        // Net of the reason's cancellation fee, and reported alongside it, so
+        // the app can show "₹X refunded, ₹Y fee" rather than a gross figure the
+        // customer never receives. Recomputing the percentage here instead of
+        // reusing netRefund is what let the two disagree.
+        cancellationFee,
+        refundAmount: wasPaid ? netRefund : 0,
       },
     });
   } catch (error: any) {

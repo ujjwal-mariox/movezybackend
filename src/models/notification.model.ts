@@ -39,6 +39,13 @@ export interface INotificationCampaign {
   audience: NotificationAudience;
   templateId?: Types.ObjectId;
   targetedCount: number;
+  /**
+   * How many of the targeted recipients actually had a push token, i.e. the
+   * most pushes this campaign could ever have delivered. Without it a campaign
+   * with 5,000 targeted / 0 sent is indistinguishable from a delivery failure —
+   * it usually means nobody has registered a device.
+   */
+  pushTargetedCount: number;
   sentCount: number;
   readCount: number;
   failedCount: number;
@@ -166,6 +173,8 @@ const NotificationCampaignSchema = new Schema<INotificationCampaign>(
     },
     templateId: { type: Schema.Types.ObjectId, ref: "PushTemplate" },
     targetedCount: { type: Number, default: 0 },
+    // Recipients that had a push token — see INotificationCampaign.
+    pushTargetedCount: { type: Number, default: 0 },
     sentCount: { type: Number, default: 0 },
     readCount: { type: Number, default: 0 },
     failedCount: { type: Number, default: 0 },

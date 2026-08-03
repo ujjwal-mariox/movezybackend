@@ -79,6 +79,29 @@ const UserSchema: Schema<IUser> = new Schema(
       type: Boolean,
       default: true,
     },
+    /**
+     * Firebase device token for push. PUT /notifications/fcm-token has always
+     * written this, but it was never declared here — Mongoose strict mode drops
+     * unknown paths silently, so the token was never stored, every reader saw
+     * undefined and no customer push could be delivered by any code path.
+     */
+    fcmToken: {
+      type: String,
+      default: null,
+    },
+    /**
+     * Per-category push preferences. The settings endpoint wrote
+     * `notificationSettings.<type>` into a path that did not exist, so every
+     * per-category opt-out was silently discarded. Declared here and honoured
+     * in notification.service.sendToUser.
+     */
+    notificationSettings: {
+      booking: { type: Boolean, default: true },
+      payment: { type: Boolean, default: true },
+      promo: { type: Boolean, default: true },
+      system: { type: Boolean, default: true },
+      chat: { type: Boolean, default: true },
+    },
     referralCode: {
       type: String,
       unique: true,

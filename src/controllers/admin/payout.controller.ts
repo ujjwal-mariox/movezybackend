@@ -1,7 +1,9 @@
 import { Request, Response } from "express";
 import Payout from "../../models/payout.model";
 import Driver from "../../models/driver.model";
+import { Expense } from "../../models/expense.model";
 import { createAuditEntry } from "./audit-log.controller";
+import * as DriverPayoutService from "../../services/driver-payout.service";
 
 // Acting admin identity off the request (set by admin-auth middleware).
 const actingAdmin = (req: Request) => {
@@ -54,6 +56,35 @@ export const createPayout = async (req: Request, res: Response) => {
   }
 
   const bank = (driver as any).bankDetails || {};
+
+  // The driver's own withdrawal route enforces all of this
+  // (driver.controller withdrawFromWallet); this admin path enforced only
+  // "amount > 0", so it could pay money the driver had already withdrawn.
+  // available = earnings + awarded incentives - payouts already PENDING/
+  // APPROVED/PAID, so an existing request is subtracted here too and a second
+  // click cannot double-pay.
+  const balance = await DriverPayoutService.getDriverAvailableBalance(driverId);
+  if (amt > balance.available) {
+    return res.status(400).json({
+      success: false,
+      message:
+        `Only ₹${balance.available.toFixed(2)} is available for payout. ` +
+        `Lifetime earnings ₹${balance.lifetimeEarnings.toFixed(2)}, ` +
+        `₹${balance.reserved.toFixed(2)} already requested or paid.`,
+      data: balance,
+    });
+  }
+
+  // A bank transfer with no account on file creates a payout that can never be
+  // executed — and bankSnapshot silently recorded empty strings.
+  const needsBank = (method || "BANK") !== "CASH";
+  if (needsBank && !(bank.accountNumber && bank.ifscCode)) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "This driver has no bank account on file, so a bank/UPI payout cannot be created.",
+    });
+  }
   const payout = await Payout.create({
     driverId,
     amount: amt,
@@ -134,6 +165,20 @@ export const approvePayout = async (req: Request, res: Response) => {
     });
   }
 
+  // Four eyes on money out. Refunds already block self-approval
+  // (refund.controller: "You cannot approve your own refund request"); payouts
+  // did not, so one admin could raise a payout for any driver and approve it.
+  if (
+    payout.requestedByType === "Admin" &&
+    String(payout.requestedBy) === String((req as any).adminId)
+  ) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "You cannot approve a payout you requested yourself. Another admin must approve it.",
+    });
+  }
+
   payout.status = "APPROVED";
   payout.approvedBy = (req as any).adminId;
   payout.approvedAt = new Date();
@@ -161,11 +206,50 @@ export const markPayoutPaid = async (req: Request, res: Response) => {
     });
   }
 
+  // Money only leaves against an approval. Paying a PENDING payout was allowed,
+  // which meant one admin could create a payout and immediately mark it PAID —
+  // the whole money-out lifecycle with a single actor and no approval on record.
+  if (payout.status !== "APPROVED") {
+    return res.status(400).json({
+      success: false,
+      message: `A payout must be APPROVED before it can be marked paid (this is ${payout.status})`,
+    });
+  }
+
+  // ...and the approver cannot also be the payer.
+  if (String(payout.approvedBy) === String((req as any).adminId)) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "You approved this payout, so a different admin must mark it paid.",
+    });
+  }
+
   payout.status = "PAID";
   payout.reference = reference || payout.reference;
   payout.paidBy = (req as any).adminId;
   payout.paidAt = new Date();
   await payout.save();
+
+  // Book the payout as an expense, the way a processed refund does. Driver
+  // payables are the platform's largest cost and nothing ever wrote them to
+  // `expenses`, so Net Profit was computed as if drivers were paid nothing.
+  // The DRIVER_PAYOUT category already existed and had never been written.
+  // Guarded so a bookkeeping failure cannot undo money that has already left.
+  try {
+    await Expense.create({
+      category: "DRIVER_PAYOUT",
+      amount: payout.amount,
+      description: `Driver payout${payout.reference ? ` (ref ${payout.reference})` : ""}`,
+      date: payout.paidAt,
+      driverId: payout.driverId,
+      transactionId: payout.reference,
+      status: "PAID",
+      createdBy: (req as any).adminId,
+    });
+  } catch (err) {
+    console.error("Payout marked PAID but expense row failed:", err);
+  }
 
   // REFUND is the closest money-out audit action (impact CRITICAL).
   await audit(

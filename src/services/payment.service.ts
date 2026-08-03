@@ -5,6 +5,7 @@ import Booking from "../models/booking.model";
 import Wallet from "../models/wallet.model";
 import WalletTransaction from "../models/wallet-transaction.model";
 import User from "../models/Users";
+import * as WalletService from "./wallet.service";
 import config from "../config";
 
 // Razorpay configuration
@@ -448,30 +449,17 @@ export const verifyWalletRecharge = async (
       creditAmount = Number(order.amount) / 100;
     }
 
-    // Find or create wallet
-    let wallet = await Wallet.findOne({ userId });
-    if (!wallet) {
-      wallet = new Wallet({
-        userId,
-        balance: 0,
-      });
-    }
-
-    const balanceBefore = wallet.balance;
-    wallet.balance += creditAmount;
-    await wallet.save();
-
-    // Create transaction record
-    await WalletTransaction.create({
+    // Credit through the one wallet-credit path. This was a read-modify-write
+    // (`wallet.balance += amount; save()`), so two recharges verified at the
+    // same moment both wrote a value computed from the same stale read and one
+    // customer top-up was lost. addToWallet upserts with $inc and writes the
+    // matching WalletTransaction row.
+    await WalletService.addToWallet(
       userId,
-      type: "CREDIT",
-      amount: creditAmount,
-      balanceBefore,
-      balanceAfter: wallet.balance,
-      description: "Wallet recharge",
-      referenceId: paymentId,
-      status: "COMPLETED",
-    });
+      creditAmount,
+      paymentId,
+      "Wallet recharge",
+    );
 
     return {
       success: true,
@@ -496,10 +484,7 @@ export const payUsingWallet = async (
   bookingId: Types.ObjectId,
 ): Promise<{ success: boolean; message: string }> => {
   try {
-    const [wallet, booking] = await Promise.all([
-      Wallet.findOne({ userId }),
-      Booking.findOne({ _id: bookingId, userId }),
-    ]);
+    const booking = await Booking.findOne({ _id: bookingId, userId });
 
     if (!booking) {
       return { success: false, message: "Booking not found" };
@@ -509,30 +494,60 @@ export const payUsingWallet = async (
       return { success: false, message: "Already paid" };
     }
 
-    if (!wallet || wallet.balance < booking.finalFare) {
-      return { success: false, message: "Insufficient wallet balance" };
+    const fare = booking.finalFare;
+    const previousStatus = booking.paymentStatus;
+    const previousMethod = booking.paymentMethod;
+
+    // Two atomic steps instead of a read-modify-write.
+    //
+    // This used to read the wallet, compare `wallet.balance < finalFare`, then
+    // `wallet.balance -= fare; wallet.save()`. save() writes the value computed
+    // from the STALE read, so two concurrent requests both saw ₹100, both
+    // passed the guard and both wrote 0 — ₹200 of trips paid with ₹100, and
+    // both WalletTransaction rows claiming the same balanceBefore/After.
+    //
+    // 1. Claim the booking: only one request can move it off "not PAID".
+    const claimed = await Booking.findOneAndUpdate(
+      { _id: bookingId, userId, paymentStatus: { $ne: "PAID" } },
+      { $set: { paymentStatus: "PAID", paymentMethod: "WALLET" } },
+      { new: true },
+    );
+    if (!claimed) {
+      return { success: false, message: "Already paid" };
     }
 
-    // Deduct from wallet
-    wallet.balance -= booking.finalFare;
-    await wallet.save();
-
-    // Create transaction
-    await WalletTransaction.create({
-      userId,
-      type: "DEBIT",
-      amount: booking.finalFare,
-      balanceBefore: wallet.balance + booking.finalFare,
-      balanceAfter: wallet.balance,
-      description: `Payment for booking ${booking.bookingNumber || "N/A"}`,
-      referenceId: bookingId.toString(),
-      status: "COMPLETED",
-    });
-
-    // Update booking
-    booking.paymentStatus = "PAID";
-    booking.paymentMethod = "WALLET";
-    await booking.save();
+    // 2. Debit the wallet conditionally on the balance still covering the fare.
+    //    WalletService is the single debit path: it does the guard and the
+    //    decrement in one findOneAndUpdate and derives balanceBefore from the
+    //    document the write returned, so the ledger cannot drift.
+    try {
+      await WalletService.debitFromWallet(
+        userId,
+        fare,
+        bookingId.toString(),
+        `Payment for booking ${claimed.bookingNumber || "N/A"}`,
+      );
+    } catch (debitErr: any) {
+      // The debit did not happen — release the claim so the booking is not left
+      // marked PAID for money that was never taken. Report the actual reason:
+      // this catch also sees DB errors, and calling those "insufficient
+      // balance" sends the customer to top up a wallet that was already funded.
+      await Booking.updateOne(
+        { _id: bookingId, paymentStatus: "PAID", paymentMethod: "WALLET" },
+        { $set: { paymentStatus: previousStatus, paymentMethod: previousMethod } },
+      );
+      const reason = String(debitErr?.message || "");
+      const insufficient = /insufficient/i.test(reason);
+      if (!insufficient) {
+        console.error("Wallet debit failed for booking", String(bookingId), debitErr);
+      }
+      return {
+        success: false,
+        message: insufficient
+          ? "Insufficient wallet balance"
+          : "Could not debit your wallet. No money was taken — please try again.",
+      };
+    }
 
     return { success: true, message: "Payment successful" };
   } catch (error: any) {

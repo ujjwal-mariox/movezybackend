@@ -152,14 +152,26 @@ export const getAllDrivers = async (req: Request, res: Response) => {
         driverId: driver._id,
         status: "COMPLETED",
       });
+      // `totalEarnings` summed finalFare — the customer's whole payment, GST
+      // and the platform's commission included — so every driver's "earnings"
+      // read ~31% high. driverEarnings is the net figure frozen at completion
+      // and is what payouts settle against (services/driver-payout.service.ts).
+      // The gross is still reported, under a name that says what it is.
       const earnings = await Booking.aggregate([
         { $match: { driverId: driver._id, status: "COMPLETED" } },
-        { $group: { _id: null, total: { $sum: "$finalFare" } } },
+        {
+          $group: {
+            _id: null,
+            net: { $sum: { $ifNull: ["$driverEarnings", 0] } },
+            gross: { $sum: { $ifNull: ["$finalFare", 0] } },
+          },
+        },
       ]);
       return {
         ...driver.toObject(),
         completedTrips,
-        totalEarnings: earnings[0]?.total || 0,
+        totalEarnings: earnings[0]?.net || 0,
+        grossFareCollected: earnings[0]?.gross || 0,
         documents: buildDriverDocuments(
           kycByDriver.get(String(driver._id)),
           driver.status,
@@ -212,14 +224,19 @@ export const getDriverById = async (req: Request, res: Response) => {
   // Get vehicles
   const vehicles = await DriverVehicle.find({ driverId: id });
 
-  // Get booking stats
+  // Get booking stats. `totalEarnings` is the driver's net (subtotal −
+  // commission, frozen at completion) on the same basis as the drivers list and
+  // Finance → Payouts; it used to sum finalFare, which includes customer GST
+  // and the platform's commission. Gross is reported alongside it under a name
+  // that says what it is, so the two can never be mistaken for each other.
   const bookingStats = await Booking.aggregate([
     { $match: { driverId: driver._id } },
     {
       $group: {
         _id: "$status",
         count: { $sum: 1 },
-        totalEarnings: { $sum: "$finalFare" },
+        totalEarnings: { $sum: { $ifNull: ["$driverEarnings", 0] } },
+        grossFareCollected: { $sum: { $ifNull: ["$finalFare", 0] } },
       },
     },
   ]);
@@ -359,13 +376,56 @@ export const verifyDriver = async (req: Request, res: Response) => {
   // The driver profile's "DL Verified" badge reads DriverKyc.isVerified. Nothing
   // ever set it, so every one of the 37 KYC records sat at false and an approved
   // driver was still told their licence was under review.
+  //
+  // Write the PER-DOCUMENT verdicts, not just the roll-up. This used to $set
+  // isVerified directly and never touch kyc.documentStatus — the field
+  // buildDriverDocuments (top of this file) reads first — so after a driver-level
+  // approval every document still showed "Pending Review" and the compliance
+  // score never moved. It also stamped isVerified:true straight over a live
+  // REJECTED document verdict, leaving the roll-up and the per-document records
+  // contradicting each other. A driver-level decision is an explicit decision on
+  // everything they submitted, so it now says so on each submitted slot, and
+  // isVerified is DERIVED with the same rule verifyDriverDocument uses below:
+  // true only when every SUBMITTED document is VERIFIED.
   try {
-    await DriverKYC.updateOne(
-      { driverId: driver._id },
-      action === "approve"
-        ? { $set: { isVerified: true, verifiedAt: new Date() } }
-        : { $set: { isVerified: false }, $unset: { verifiedAt: "" } },
-    );
+    const kyc: any = await DriverKYC.findOne({ driverId: driver._id });
+    if (kyc) {
+      const reviewedAt = new Date();
+      const reviewedBy = (req as any).admin?._id;
+      kyc.documentStatus = kyc.documentStatus || {};
+
+      for (const slot of KYC_DOCUMENT_TYPES) {
+        // A slot the driver never uploaded stays PENDING — approving a driver
+        // must not certify a document that does not exist.
+        if (!isDocumentSubmitted(kyc, slot)) continue;
+        kyc.documentStatus[slot] =
+          action === "approve"
+            ? {
+                status: "VERIFIED",
+                reviewedAt,
+                reviewedBy,
+                rejectionReason: undefined,
+              }
+            : {
+                status: "REJECTED",
+                reviewedAt,
+                reviewedBy,
+                rejectionReason: driver.rejectionReason,
+              };
+      }
+
+      const submitted = KYC_DOCUMENT_TYPES.filter((t) =>
+        isDocumentSubmitted(kyc, t),
+      );
+      const allVerified =
+        submitted.length > 0 &&
+        submitted.every((t) => kyc.documentStatus?.[t]?.status === "VERIFIED");
+
+      kyc.isVerified = allVerified;
+      kyc.verifiedAt = allVerified ? reviewedAt : undefined;
+      kyc.markModified("documentStatus");
+      await kyc.save();
+    }
   } catch (e) {
     console.error("failed to propagate verification to KYC", e);
   }
@@ -1045,7 +1105,13 @@ export const getDriverEarnings = async (req: Request, res: Response) => {
   const { id } = req.params;
   const { dateFrom, dateTo } = req.query;
 
-  const matchQuery: any = { driverId: id, status: "COMPLETED" };
+  // Booking.driverId is an ObjectId and Mongoose does not cast $match inside an
+  // aggregation pipeline, so matching on the raw string from req.params matched
+  // nothing and this endpoint reported ₹0 for every driver.
+  const matchQuery: any = {
+    driverId: Types.ObjectId.isValid(id) ? new Types.ObjectId(id) : id,
+    status: "COMPLETED",
+  };
 
   if (dateFrom || dateTo) {
     matchQuery.createdAt = {};

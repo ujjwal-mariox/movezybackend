@@ -11,6 +11,7 @@ import * as notificationService from "../../services/notification.service";
 import * as mqttUtil from "../../utils/mqtt.util";
 import * as bookingDispatchService from "../../services/booking-dispatch.service";
 import * as PaymentService from "../../services/payment.service";
+import * as EnterpriseService from "../../services/enterprise.service";
 
 /**
  * Get all bookings with filters
@@ -118,13 +119,26 @@ export const cancelBooking = async (req: Request, res: Response) => {
   const bookingIdStr = String(booking._id);
 
   booking.status = "CANCELLED";
-  booking.cancelledBy = "SYSTEM";
+  // Was "SYSTEM", which is what an automatic cancellation records — an admin's
+  // decision was indistinguishable from no-driver-found after the fact.
+  booking.cancelledBy = "ADMIN";
   booking.cancellationReason = reason || "Cancelled by admin";
   booking.cancelledAt = new Date();
   booking.refundAmount = refundAmount || 0;
   booking.refundStatus = refundAmount > 0 ? "PENDING" : "NONE";
 
   await booking.save();
+
+  // Return the enterprise credit this booking consumed — usedCredit was never
+  // decremented anywhere, so an enterprise's utilisation only went up. If the
+  // admin named a partial refund, release exactly that much and leave the rest
+  // charged; an admin cancelling with no refund figure is treated as a
+  // platform-side cancellation, so the enterprise is made whole.
+  await EnterpriseService.releaseCreditForBooking(
+    booking,
+    `Credit released — booking ${booking.bookingNumber} cancelled by admin`,
+    Number(refundAmount) > 0 ? Number(refundAmount) : undefined,
+  );
 
   // Real-time propagation to user & driver apps
   try {
@@ -411,6 +425,36 @@ export const assignDriver = async (req: Request, res: Response) => {
     return res.status(400).json({
       success: false,
       message: "Booking is not in searching status",
+    });
+  }
+
+  if ((driver as any).isActive === false) {
+    return res.status(400).json({
+      success: false,
+      message: "Driver is deactivated and cannot be assigned",
+    });
+  }
+
+  if (!driver.isOnline) {
+    return res.status(400).json({
+      success: false,
+      message: "Driver is offline and cannot be assigned",
+    });
+  }
+
+  // Reassigning a busy driver used to overwrite driver.currentBookingId below,
+  // orphaning the earlier trip's BUSY flag — the driver was then freed by
+  // whichever trip completed first, while the other stayed stuck. Check the
+  // bookings themselves rather than currentBookingId, which can be stale.
+  const activeBooking = await Booking.findOne({
+    driverId: driver._id,
+    _id: { $ne: booking._id },
+    status: { $in: ["ASSIGNED", "DRIVER_ARRIVED", "PICKED", "IN_PROGRESS"] },
+  }).select("bookingNumber");
+  if (activeBooking) {
+    return res.status(400).json({
+      success: false,
+      message: `Driver is already on booking ${activeBooking.bookingNumber || activeBooking._id}`,
     });
   }
 

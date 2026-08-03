@@ -412,12 +412,19 @@ async function getWeeklyEarnings(driverId: string, weeks: number = 4) {
       {
         $group: {
           _id: null,
-          totalEarnings: { $sum: "$finalFare" },
+          // What the driver earned: net of the platform's commission and the
+          // customer's GST. This summed finalFare, which is the customer's
+          // whole payment, so weekly "earnings" ran ~31% above what a payout
+          // would ever settle.
+          totalEarnings: { $sum: { $ifNull: ["$driverEarnings", 0] } },
           tripCount: { $sum: 1 },
-          cashEarnings: {
+          // Deliberately still gross: these are cash-vs-online COLLECTED
+          // amounts and feed COD reasoning, so they must stay on the money that
+          // actually changed hands. Renamed so the two bases cannot be confused.
+          cashCollected: {
             $sum: { $cond: [{ $eq: ["$paymentMethod", "CASH"] }, "$finalFare", 0] },
           },
-          onlineEarnings: {
+          onlineCollected: {
             $sum: { $cond: [{ $ne: ["$paymentMethod", "CASH"] }, "$finalFare", 0] },
           },
         },
@@ -430,8 +437,8 @@ async function getWeeklyEarnings(driverId: string, weeks: number = 4) {
       weekEnd,
       totalEarnings: earnings[0]?.totalEarnings || 0,
       tripCount: earnings[0]?.tripCount || 0,
-      cashEarnings: earnings[0]?.cashEarnings || 0,
-      onlineEarnings: earnings[0]?.onlineEarnings || 0,
+      cashCollected: earnings[0]?.cashCollected || 0,
+      onlineCollected: earnings[0]?.onlineCollected || 0,
     });
   }
 

@@ -103,6 +103,13 @@ export const PERMISSIONS = {
   // Finance Module
   FINANCE_VIEW: "finance:view",
   FINANCE_EXPORT: "finance:export",
+  // Paying money out needs its own gate. Every payout mutation — driver
+  // payouts AND customer coin cash-outs — was gated on FINANCE_VIEW, the
+  // same read-only permission as the finance overview, so any role that
+  // could look at revenue could also disburse funds to itself.
+  PAYOUTS_CREATE: "payouts:create",
+  PAYOUTS_APPROVE: "payouts:approve",
+  PAYOUTS_PAY: "payouts:pay",
 
   // Driver Instructions
   DRIVER_INSTRUCTIONS_VIEW: "driver-instructions:view",
@@ -231,7 +238,13 @@ export const PERMISSION_GROUPS = {
   Pricing: [PERMISSIONS.PRICING_VIEW, PERMISSIONS.PRICING_UPDATE],
   Automation: [PERMISSIONS.AUTOMATION_VIEW, PERMISSIONS.AUTOMATION_MANAGE],
   "Audit Logs": [PERMISSIONS.AUDIT_VIEW],
-  Finance: [PERMISSIONS.FINANCE_VIEW, PERMISSIONS.FINANCE_EXPORT],
+  Finance: [
+    PERMISSIONS.FINANCE_VIEW,
+    PERMISSIONS.FINANCE_EXPORT,
+    PERMISSIONS.PAYOUTS_CREATE,
+    PERMISSIONS.PAYOUTS_APPROVE,
+    PERMISSIONS.PAYOUTS_PAY,
+  ],
   "Driver Instructions": [
     PERMISSIONS.DRIVER_INSTRUCTIONS_VIEW,
     PERMISSIONS.DRIVER_INSTRUCTIONS_CREATE,
@@ -280,14 +293,41 @@ export const PERMISSION_GROUPS = {
   ],
 };
 
-// Sidebar modules mapping to permissions
+// Sidebar modules mapping to permissions.
+//
+// This object is the single source of truth for the nav: login and /auth/me
+// return the ids whose permissions the admin holds (admin-auth.controller), and
+// the panel renders ONLY those for non-Super-Admins. Ten sidebar ids were
+// missing from here — compliance, reports, commissions, cms, wallet,
+// categories, addon-services, cancellation-reasons, audit-logs, automation — so
+// those items were invisible to every staff member even when they held the
+// matching permission (Document Compliance was unreachable from the nav for an
+// Operations Manager with drivers:view). Each entry lists the permission that
+// actually gates the page's own read endpoint, so an item never appears for
+// someone who would then get a 403.
 export const SIDEBAR_MODULES = {
   dashboard: [PERMISSIONS.DASHBOARD_VIEW],
   "app-users": [PERMISSIONS.USERS_VIEW],
   riders: [PERMISSIONS.DRIVERS_VIEW],
+  // GET /admin/drivers — the compliance page's only request.
+  compliance: [PERMISSIONS.DRIVERS_VIEW],
   "vehicle-management": [PERMISSIONS.VEHICLES_VIEW],
   orders: [PERMISSIONS.BOOKINGS_VIEW],
   payments: [PERMISSIONS.PAYMENTS_VIEW],
+  // GET /wallet/admin/* (wallet.routes.ts) is gated on payments:view.
+  wallet: [PERMISSIONS.PAYMENTS_VIEW],
+  // GET /admin/reports/* is gated on reports:view.
+  reports: [PERMISSIONS.REPORTS_VIEW],
+  // Commission & Charges edits FareConfig via /admin/config/fare.
+  commissions: [PERMISSIONS.SETTINGS_VIEW],
+  // GET /admin/config/goods-types (delivery categories).
+  categories: [PERMISSIONS.SETTINGS_VIEW],
+  "addon-services": [PERMISSIONS.SETTINGS_VIEW],
+  "cancellation-reasons": [PERMISSIONS.SETTINGS_VIEW],
+  // Content & Policies — GET /admin/content.
+  cms: [PERMISSIONS.SETTINGS_VIEW],
+  "audit-logs": [PERMISSIONS.AUDIT_VIEW],
+  automation: [PERMISSIONS.AUTOMATION_VIEW],
   enterprises: [PERMISSIONS.ENTERPRISES_VIEW],
   sos: [PERMISSIONS.SOS_VIEW],
   tracking: [PERMISSIONS.TRACKING_VIEW],
@@ -453,6 +493,10 @@ export const DEFAULT_ROLES = {
       PERMISSIONS.ENTERPRISES_VIEW,
       PERMISSIONS.FINANCE_VIEW,
       PERMISSIONS.FINANCE_EXPORT,
+      // Money-out. Deliberately NOT granted to Operations Manager.
+      PERMISSIONS.PAYOUTS_CREATE,
+      PERMISSIONS.PAYOUTS_APPROVE,
+      PERMISSIONS.PAYOUTS_PAY,
       PERMISSIONS.AUDIT_VIEW,
     ],
     isSystem: true,

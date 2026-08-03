@@ -245,12 +245,27 @@ export const sendToUser = async (
     });
     await notification.save();
 
-    // Get user's FCM token
+    // Get user's FCM token.
+    //
+    // The opt-in flag on the User schema is `notificationAllowed`. This selected
+    // and tested `isNotificationEnabled`, which is a Driver field and not a User
+    // path at all, so it always read undefined and the customer's opt-out was
+    // never consulted. Per-category preferences are checked too, now that
+    // `notificationSettings` is a declared path and actually persists.
     const user = await User.findById(userId).select(
-      "fcmToken isNotificationEnabled",
+      "fcmToken notificationAllowed notificationSettings",
     );
 
-    if (user?.fcmToken && user.isNotificationEnabled !== false) {
+    // Category keys are the lowercased notification type. REWARD has no toggle
+    // of its own, so it is always allowed.
+    const categoryAllowed =
+      (user?.notificationSettings as any)?.[type.toLowerCase()] !== false;
+
+    if (
+      user?.fcmToken &&
+      user.notificationAllowed !== false &&
+      categoryAllowed
+    ) {
       await sendPushNotification(user.fcmToken, title, body, {
         ...data,
         notificationId: notification._id.toString(),
@@ -546,7 +561,10 @@ export const sendPromoNotification = async (
   promoCode?: string,
   targetAudience?: "ALL" | "ACTIVE" | "INACTIVE",
 ) => {
-  const query: any = { isActive: true, isNotificationEnabled: true };
+  // `notificationAllowed` is the real User path — filtering on
+  // `isNotificationEnabled: true` matched no customer at all, so this promo
+  // broadcast always resolved to an empty audience.
+  const query: any = { isActive: true, notificationAllowed: { $ne: false } };
 
   if (targetAudience === "ACTIVE") {
     const thirtyDaysAgo = new Date();
@@ -728,10 +746,13 @@ export const sendBroadcast = async (params: {
     if (params.userIds?.length) {
       userFilter._id = { $in: params.userIds };
     }
+    // `notificationAllowed` is the User schema's opt-in flag;
+    // `isNotificationEnabled` is a Driver field and was always undefined here,
+    // so a customer's opt-out was never honoured on broadcasts either.
     const users = await User.find(userFilter).select(
-      "_id fcmToken isNotificationEnabled",
+      "_id fcmToken notificationAllowed",
     );
-    const list = users.filter((u: any) => u.isNotificationEnabled !== false);
+    const list = users.filter((u: any) => u.notificationAllowed !== false);
     targeted += list.length;
     list.forEach((u: any) => {
       if (u.fcmToken) tokens.push(u.fcmToken);
@@ -808,6 +829,11 @@ export const sendBroadcast = async (params: {
     campaign._id,
     {
       targetedCount: targeted,
+      // How many of those recipients could receive a push at all. Recorded so a
+      // "targeted 5,000 / sent 0" row is explicable instead of reading as a
+      // successful broadcast that reached nobody: the in-app inbox rows above
+      // were written for all `targeted`, the push only for these.
+      pushTargetedCount: tokens.length,
       sentCount: sent,
       failedCount: failed,
       status: failed > 0 && sent === 0 ? "FAILED" : "SENT",

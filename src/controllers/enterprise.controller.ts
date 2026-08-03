@@ -494,7 +494,9 @@ export const createCreditBooking = async (req: Request, res: Response) => {
       data: booking,
     });
   } catch (error: any) {
-    res.status(500).json({
+    // Rejected input (missing coordinates, credit exhausted, unsupported
+    // add-ons) is the caller's to fix — reporting it as a 500 hid that.
+    res.status(error?.status || 500).json({
       success: false,
       message: error.message || "Failed to create booking",
     });

@@ -139,14 +139,26 @@ export const toggleNotifications = async (req: Request, res: Response) => {
     const User = require("../models/Users").default;
 
     if (type) {
-      // Toggle specific notification type
+      // Toggle one category. Keys are validated against the schema's
+      // notificationSettings paths — an unknown one used to be written into a
+      // path that did not exist and was silently discarded, so the app showed a
+      // saved preference that had never been stored.
+      const key = String(type).toLowerCase();
+      const CATEGORIES = ["booking", "payment", "promo", "system", "chat"];
+      if (!CATEGORIES.includes(key)) {
+        return res.status(400).json({
+          success: false,
+          message: `Unknown notification type "${type}". Expected one of: ${CATEGORIES.join(", ")}.`,
+        });
+      }
       await User.findByIdAndUpdate(userId, {
-        [`notificationSettings.${type}`]: enabled,
+        [`notificationSettings.${key}`]: enabled !== false,
       });
     } else {
-      // Toggle all notifications
+      // Master switch. `isNotificationEnabled` is not a User path (it belongs to
+      // Driver), so this write was dropped and the opt-out never took effect.
       await User.findByIdAndUpdate(userId, {
-        isNotificationEnabled: enabled,
+        notificationAllowed: enabled !== false,
       });
     }
 
@@ -170,14 +182,15 @@ export const getNotificationSettings = async (req: Request, res: Response) => {
     const userId = (req as any).user._id;
 
     const User = require("../models/Users").default;
+    // `notificationAllowed` is the master flag on the User schema.
     const user = await User.findById(userId).select(
-      "isNotificationEnabled notificationSettings",
+      "notificationAllowed notificationSettings",
     );
 
     res.json({
       success: true,
       data: {
-        enabled: user?.isNotificationEnabled ?? true,
+        enabled: user?.notificationAllowed ?? true,
         settings: user?.notificationSettings || {
           booking: true,
           payment: true,

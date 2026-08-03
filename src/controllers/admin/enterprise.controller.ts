@@ -84,20 +84,56 @@ export const createEnterprise = async (req: Request, res: Response) => {
 export const updateEnterpriseAdmin = async (req: Request, res: Response) => {
   try {
     const { enterpriseId } = req.params;
-    const updateData = req.body;
 
-    // Remove fields that shouldn't be updated directly
-    delete updateData._id;
-    delete updateData.createdAt;
-    delete updateData.updatedAt;
+    // Allow-list, not the raw body.
+    //
+    // This used to $set req.body wholesale (minus _id/timestamps), so the Edit
+    // form could rewrite LEDGER fields: submitting the form round-tripped
+    // `usedCredit`, silently erasing outstanding receivables with no
+    // CreditHistory row to explain where the money went. Credit movements must
+    // only happen through the credit endpoints that write a ledger entry.
+    const EDITABLE_FIELDS = [
+      "companyName",
+      "contactPersonName",
+      "email",
+      "phone",
+      "alternatePhone",
+      "gstin",
+      "panNumber",
+      "address",
+      "city",
+      "state",
+      "pinCode",
+      "billingCycle",
+      "paymentTerms",
+      "discountPercentage",
+      "isActive",
+      "notes",
+    ];
 
-    if (updateData.email) updateData.email = updateData.email.toLowerCase();
-    if (updateData.gstin) updateData.gstin = updateData.gstin.toUpperCase();
+    const updateData: Record<string, any> = {};
+    for (const key of EDITABLE_FIELDS) {
+      if (Object.prototype.hasOwnProperty.call(req.body ?? {}, key)) {
+        updateData[key] = req.body[key];
+      }
+    }
+
+    if (updateData.email) updateData.email = String(updateData.email).toLowerCase();
+    if (updateData.gstin) updateData.gstin = String(updateData.gstin).toUpperCase();
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No editable fields were provided.",
+      });
+    }
 
     const enterprise = await Enterprise.findByIdAndUpdate(
       enterpriseId,
       { $set: updateData },
-      { new: true },
+      // runValidators: schema rules (enums, min/max) were skipped entirely
+      // before, so an invalid billingCycle or a negative discount persisted.
+      { new: true, runValidators: true },
     );
 
     if (!enterprise) {

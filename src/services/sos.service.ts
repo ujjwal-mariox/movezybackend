@@ -436,21 +436,29 @@ export const shareLiveLocation = async (
 };
 
 /**
- * Notify police (admin action)
+ * RECORD that an admin contacted the police. It does NOT contact anyone.
+ *
+ * There is no emergency-services integration in this platform — this only
+ * timestamps the operator's own action so the response is auditable. The admin
+ * UI used to call this "Notify Police" and then tell the operator "Police has
+ * been notified", which in a live emergency is the most dangerous possible lie:
+ * nobody had been contacted. The UI now states that the operator must call, and
+ * this records who logged it and when.
  */
-export const notifyPolice = async (
+export const recordPoliceContacted = async (
   sosId: Types.ObjectId,
   adminId: Types.ObjectId,
 ): Promise<ISOSAlert | null> => {
-  // In production, integrate with local police API or emergency services
-  console.log(`Police notified for SOS: ${sosId} by admin: ${adminId}`);
-
   return SOSAlert.findByIdAndUpdate(
     sosId,
     {
       policeNotified: true,
       policeNotifiedAt: new Date(),
+      policeNotifiedBy: adminId,
     },
     { new: true },
   );
 };
+
+/** @deprecated Misleading name kept so existing callers keep compiling. */
+export const notifyPolice = recordPoliceContacted;

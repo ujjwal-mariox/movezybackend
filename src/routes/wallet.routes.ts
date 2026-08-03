@@ -4,9 +4,10 @@ import AdminAuthMiddleware from "../middlewares/admin-auth.middleware";
 import ErrorHandlerMiddleware from "../middlewares/error-handler.middleware";
 import ResponseMiddleware from "../middlewares/response.middleware";
 import * as WalletController from "../controllers/wallet.controller";
+import { PERMISSIONS } from "../models/role.model";
 
 const router = Router();
-const { verifyAdminToken } = AdminAuthMiddleware();
+const { verifyAdminToken, requirePermission } = AdminAuthMiddleware();
 
 // ─── USER ROUTES ───
 
@@ -36,30 +37,35 @@ router.get(
 router.get(
   "/admin/all",
   verifyAdminToken,
+  requirePermission(PERMISSIONS.PAYMENTS_VIEW),
   WalletController.adminGetAllWallets
 );
 
 router.get(
   "/admin/user/:userId",
   verifyAdminToken,
+  requirePermission(PERMISSIONS.PAYMENTS_VIEW),
   WalletController.adminGetUserWallet
 );
 
 router.post(
   "/admin/user/:userId/credit",
   verifyAdminToken,
+  requirePermission(PERMISSIONS.PAYMENTS_PROCESS),
   WalletController.adminCreditWallet
 );
 
 router.post(
   "/admin/user/:userId/debit",
   verifyAdminToken,
+  requirePermission(PERMISSIONS.PAYMENTS_PROCESS),
   WalletController.adminDebitWallet
 );
 
 router.get(
   "/admin/transactions",
   verifyAdminToken,
+  requirePermission(PERMISSIONS.PAYMENTS_VIEW),
   WalletController.adminGetAllTransactions
 );
 

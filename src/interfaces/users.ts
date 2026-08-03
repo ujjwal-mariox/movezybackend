@@ -17,10 +17,19 @@ export interface IUser extends Document {
   isBlocked?: boolean;
   blockedAt?: Date | null;
   blockReason?: string | null;
+  /** Master push opt-in. This is the real schema path — NOT isNotificationEnabled. */
   notificationAllowed: boolean;
+  /** Firebase device token used to deliver push to this customer. */
+  fcmToken?: string | null;
+  /** Per-category push preferences; keys match the lowercased notification type. */
+  notificationSettings?: {
+    booking?: boolean;
+    payment?: boolean;
+    promo?: boolean;
+    system?: boolean;
+    chat?: boolean;
+  };
   token?: string | null;
-  deviceToken?: string | null;
-  deviceType?: string | null;
   referralCode?: string | null;
   referredBy?: any;
   referralApplied?: boolean;

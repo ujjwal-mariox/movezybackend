@@ -13,7 +13,13 @@ export interface ICreditHistory {
   invoiceId?: Types.ObjectId;
   paymentId?: string;
   reason: string;
-  performedBy: Types.ObjectId; // Admin who made the change
+  /**
+   * Admin who made the change. Absent for rows the platform writes itself —
+   * credit consumed by a customer's credit booking, and credit released when
+   * that booking is cancelled. `performedByType` says which.
+   */
+  performedBy?: Types.ObjectId;
+  performedByType?: "ADMIN" | "CUSTOMER" | "SYSTEM";
   createdAt: Date;
 }
 
@@ -58,10 +64,17 @@ const CreditHistorySchema = new Schema<ICreditHistory>(
       required: true,
       trim: true,
     },
+    // Not required: rows written by the platform itself (a customer's credit
+    // booking, or the release when it is cancelled) have no admin actor. Making
+    // it required meant those rows could not be written at all.
     performedBy: {
       type: Schema.Types.ObjectId,
       ref: "Admin",
-      required: true,
+    },
+    performedByType: {
+      type: String,
+      enum: ["ADMIN", "CUSTOMER", "SYSTEM"],
+      default: "ADMIN",
     },
   },
   { timestamps: true },

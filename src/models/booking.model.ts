@@ -215,7 +215,11 @@ const BookingSchema = new Schema<IBooking>(
     cancellationReason: String,
     cancelledBy: {
       type: String,
-      enum: ["USER", "DRIVER", "SYSTEM"],
+      // "ADMIN" is distinct from "SYSTEM": an admin cancellation is a person's
+      // decision and is auditable, whereas SYSTEM covers automatic ones (no
+      // driver found, payment expiry). Admin cancels used to record SYSTEM, so
+      // the two were indistinguishable after the fact.
+      enum: ["USER", "DRIVER", "SYSTEM", "ADMIN"],
     },
     cancellationFee: { type: Number, default: 0 },
     refundAmount: { type: Number, default: 0 },

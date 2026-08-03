@@ -134,17 +134,30 @@ const evaluateTrigger = async (
   }
 
   if (type === "driver_idle") {
-    // Drivers online but with no location update for > threshold minutes.
+    // Minutes since a driver's last location update, for drivers marked online.
+    //
+    // The query used to hardcode "idle longer than the threshold" and then
+    // discard the rule's operator, so a "< 30 minutes" rule fired on exactly
+    // the drivers it should have excluded. Only narrow in the database when the
+    // operator agrees with that direction; otherwise evaluate every online
+    // driver and let the comparison below decide.
     const cutoff = new Date(Date.now() - threshold * 60 * 1000);
-    const rows = await DriverLocation.find({
-      isOnline: true,
-      lastUpdated: { $lt: cutoff },
-    }).select("driverId lastUpdated");
-    return rows.map((r) => ({
-      targetId: r.driverId as Types.ObjectId,
-      targetType: "Driver" as const,
-      value: Math.round((Date.now() - new Date(r.lastUpdated!).getTime()) / 60000),
-    }));
+    const query: Record<string, unknown> = { isOnline: true };
+    if (operator === "gt" || operator === "gte") {
+      query.lastUpdated = { $lt: cutoff };
+    }
+    const rows = await DriverLocation.find(query).select("driverId lastUpdated");
+    return (
+      rows
+        .map((r) => ({
+          targetId: r.driverId as Types.ObjectId,
+          targetType: "Driver" as const,
+          value: Math.round(
+            (Date.now() - new Date(r.lastUpdated!).getTime()) / 60000,
+          ),
+        }))
+        .filter((h) => compare(h.value, operator, threshold))
+    );
   }
 
   return []; // acknowledged-only trigger types

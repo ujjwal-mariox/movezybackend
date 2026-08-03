@@ -170,26 +170,20 @@ export const getFinanceOverview = async (req: Request, res: Response) => {
       period,
     };
   } catch (err) {
+    // Rethrow rather than answering 200 with a zero-filled summary. A failed
+    // aggregation used to be indistinguishable over the wire from a genuine
+    // month of no revenue, so an outage rendered as a real ₹0 finance page.
+    // ErrorHandlerMiddleware turns this into an error response the client can
+    // tell apart from data.
     console.error("[Finance] Overview error:", err);
-    res.locals.data = {
-      summary: {
-        grossRevenue: 0,
-        netRevenue: 0,
-        totalCommission: 0,
-        totalRefunds: 0,
-        refundCount: 0,
-        refundRatio: 0,
-        totalOrders: 0,
-        avgOrderValue: 0,
-      },
-      paymentMethods: [],
-      dailyRevenue: [],
-      period,
-    };
+    throw err;
   }
 };
 
-// GET /admin/finance/payouts
+// Dead: GET /admin/finance/payouts is served by PayoutController.listPayouts
+// (admin.routes.ts). Nothing routes or imports this. Kept only because deleting
+// it is a separate change from the correctness pass; do not wire it up — the
+// payout lifecycle (approve/pay separation of duties) lives in PayoutController.
 export const getPayouts = async (req: Request, res: Response) => {
   const { page = 1, limit = 50, status, driverId } = req.query;
   const db = mongoose.connection.db;
@@ -225,11 +219,11 @@ export const getPayouts = async (req: Request, res: Response) => {
         pages: Math.ceil(total / Number(limit)),
       },
     };
-  } catch {
-    res.locals.data = {
-      payouts: [],
-      pagination: { total: 0, page: 1, limit: 50, pages: 0 },
-    };
+  } catch (err) {
+    // An empty payout queue and a failed one look identical to the client, and
+    // the difference is whether drivers are owed money nobody can see.
+    console.error("[Finance] Payouts error:", err);
+    throw err;
   }
 };
 
@@ -359,8 +353,11 @@ export const getDriverEarnings = async (req: Request, res: Response) => {
 
     res.locals.data = { drivers, period };
   } catch (err) {
+    // "No driver earned anything" is a real answer this endpoint can give, so
+    // it must not also be the failure answer — the payout table is built from
+    // this list.
     console.error("[Finance] driver-earnings error:", err);
-    res.locals.data = { drivers: [], period };
+    throw err;
   }
 };
 
@@ -444,14 +441,12 @@ export const getCODSummary = async (req: Request, res: Response) => {
       pendingOrders: pendingCOD[0]?.pendingOrders || 0,
       driverCODBalances,
     };
-  } catch {
-    res.locals.data = {
-      totalCollected: 0,
-      totalCODOrders: 0,
-      pendingSettlement: 0,
-      pendingOrders: 0,
-      driverCODBalances: [],
-    };
+  } catch (err) {
+    // Unsettled COD is cash drivers are holding on the platform's behalf.
+    // Reporting ₹0 because the aggregation failed says "nobody owes us
+    // anything", which is the most expensive possible wrong answer here.
+    console.error("[Finance] COD summary error:", err);
+    throw err;
   }
 };
 
@@ -640,6 +635,9 @@ export const getLiveStats = async (req: Request, res: Response) => {
       todayCancelled,
       todayTotal,
       delayedOrders,
+      driversOnTrip,
+      completedToday,
+      pendingToday,
     ] = await Promise.all([
       bookingsCollection.countDocuments({}),
       bookingsCollection.countDocuments({
@@ -675,6 +673,24 @@ export const getLiveStats = async (req: Request, res: Response) => {
         status: { $in: ["ASSIGNED", "DRIVER_ARRIVED", "PICKED", "IN_PROGRESS"] },
         estimatedDropTime: { $ne: null, $lt: new Date() },
       }),
+      // Online drivers currently carrying a booking. Without this the driver
+      // performance donut had no on-trip-vs-idle split to render and showed an
+      // explicit "not available" state rather than guessing from utilisation.
+      driversCollection.countDocuments({
+        isOnline: true,
+        status: "approved",
+        currentBookingId: { $ne: null },
+      }),
+      // Same-day outcome counts for the "Today" bar chart, which read two
+      // fields this endpoint never returned.
+      bookingsCollection.countDocuments({
+        createdAt: { $gte: today },
+        status: "COMPLETED",
+      }),
+      bookingsCollection.countDocuments({
+        createdAt: { $gte: today },
+        status: "SEARCHING",
+      }),
     ]);
 
     const failureRate =
@@ -697,21 +713,16 @@ export const getLiveStats = async (req: Request, res: Response) => {
       driverUtilization: Number(utilization),
       delayedOrders,
       cancelledToday: todayCancelled,
+      driversOnTrip,
+      completedToday,
+      pendingToday,
     };
   } catch (err) {
+    // Zero-filled stats are indistinguishable from a genuinely idle platform —
+    // "0 live orders, 0 drivers online, 0 SOS" is exactly what an operator does
+    // not want to be told during an outage. Fail loudly instead.
     console.error("[Dashboard] Live stats error:", err);
-    res.locals.data = {
-      totalOrders: 0,
-      liveOrders: 0,
-      pendingOrders: 0,
-      todayRevenue: 0,
-      activeDrivers: 0,
-      totalDrivers: 0,
-      activeSOS: 0,
-      totalUsers: 0,
-      failureRate: 0,
-      driverUtilization: 0,
-    };
+    throw err;
   }
 };
 

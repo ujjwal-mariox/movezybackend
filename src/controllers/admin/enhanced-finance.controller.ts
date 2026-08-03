@@ -51,6 +51,7 @@ export const getEnhancedOverview = async (req: Request, res: Response) => {
 
     const [
       revenueData,
+      refundData,
       expenseData,
       paymentMethods,
       dailyRevenue,
@@ -77,10 +78,35 @@ export const getEnhancedOverview = async (req: Request, res: Response) => {
               // used to multiply gross by a hardcoded 0.2, so the dashboard
               // reported a commission the platform was not actually taking.
               totalCommission: { $sum: { $ifNull: ["$commissionAmount", 0] } },
+              // GST collected from customers. It is inside grossRevenue but is
+              // not platform income — it is remitted. Reported separately so
+              // the finance page can show it instead of implying the platform
+              // keeps it.
+              totalGST: { $sum: { $ifNull: ["$gstAmount", 0] } },
+            },
+          },
+        ])
+        .toArray(),
+
+      // Refunds — deliberately OUTSIDE the status-filtered pipeline above.
+      // Summing refundAmount inside a $match restricted to COMPLETED bookings
+      // missed every refund on a CANCELLED trip (the normal case), so this card
+      // disagreed with /admin/finance/overview for the same period and did not
+      // move at all when a cancelled booking was refunded. Same filter as
+      // finance.controller.ts getFinanceOverview so the two agree.
+      bookingsCollection
+        .aggregate([
+          {
+            $match: {
+              createdAt: { $gte: startDate, $lte: endDate },
+              refundAmount: { $gt: 0 },
+            },
+          },
+          {
+            $group: {
+              _id: null,
               totalRefunds: { $sum: "$refundAmount" },
-              refundCount: {
-                $sum: { $cond: [{ $eq: ["$refundStatus", "PROCESSED"] }, 1, 0] },
-              },
+              refundCount: { $sum: 1 },
             },
           },
         ])
@@ -208,14 +234,20 @@ export const getEnhancedOverview = async (req: Request, res: Response) => {
       invoicesCollection
         .aggregate([
           {
+            // "SENT"/"OVERDUE" are not in the Invoice status enum
+            // (invoice.model.ts: GENERATED | PAID | CANCELLED | REFUNDED), so
+            // only GENERATED can ever match. GENERATED = raised, not yet paid.
             $match: {
-              status: { $in: ["GENERATED", "SENT"] },
+              status: { $in: ["GENERATED"] },
               createdAt: { $gte: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) },
             },
           },
           {
             $project: {
-              amount: 1,
+              // The invoice total is `grandTotal`; there is no `amount` path on
+              // the schema, so every $sum over it returned 0 and the whole
+              // aging table read ₹0 next to a real invoice count.
+              amount: { $ifNull: ["$grandTotal", 0] },
               daysOutstanding: {
                 $divide: [
                   { $subtract: [new Date(), "$createdAt"] },
@@ -263,34 +295,64 @@ export const getEnhancedOverview = async (req: Request, res: Response) => {
     // Calculate metrics
     const revenue = revenueData[0] || {};
     const gross = revenue.grossRevenue || 0;
-    const refunds = revenue.totalRefunds || 0;
-    const totalExpenses = expenseData.reduce((sum: number, e: any) => sum + e.total, 0);
+    const refunds = refundData[0]?.totalRefunds || 0;
+    const refundCount = refundData[0]?.refundCount || 0;
 
-    // Calculate DSO (Days Sales Outstanding)
+    // Refunds are already subtracted as booking.refundAmount above, and the
+    // refund approval flow ALSO auto-creates an Expense{category:"REFUND"}
+    // (refund.controller.ts). Counting that expense here subtracted the same
+    // refund twice and put it in the admin's "Total Expenses" tile for an item
+    // they never entered. Operating expenses only, therefore.
+    const refundExpenses = expenseData
+      .filter((e: any) => e._id === "REFUND")
+      .reduce((sum: number, e: any) => sum + e.total, 0);
+    const totalExpenses = expenseData
+      .filter((e: any) => e._id !== "REFUND")
+      .reduce((sum: number, e: any) => sum + e.total, 0);
+
+    // Calculate DSO (Days Sales Outstanding). With no revenue in the range there
+    // is no daily-revenue denominator, so DSO is unknown — report null rather
+    // than "0 days", which reads as "nothing outstanding".
     const avgDailyRevenue = gross / Math.max(1, Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)));
-    const dso = invoiceAging[0]?.totalOutstanding && avgDailyRevenue > 0
-      ? (invoiceAging[0].totalOutstanding / avgDailyRevenue).toFixed(1)
-      : 0;
+    const outstanding = invoiceAging[0]?.totalOutstanding || 0;
+    const dso =
+      avgDailyRevenue > 0
+        ? Number((outstanding / avgDailyRevenue).toFixed(1))
+        : outstanding === 0
+          ? 0
+          : null;
 
     res.locals.data = {
       summary: {
         grossRevenue: gross,
-        netRevenue: gross - refunds - totalExpenses,
+        // Revenue net of refunds — the same basis /admin/finance/overview uses.
+        // Operating expenses belong to netProfit below, not to net revenue.
+        netRevenue: gross - refunds,
         totalCommission: revenue.totalCommission || 0,
+        // Customer GST collected in the window — remitted, not platform income.
+        totalGST: revenue.totalGST || 0,
         totalRefunds: refunds,
-        refundCount: revenue.refundCount || 0,
-        refundRatio: revenue.totalOrders > 0 
-          ? ((revenue.refundCount || 0) / revenue.totalOrders * 100).toFixed(2)
+        refundCount,
+        refundRatio: revenue.totalOrders > 0
+          ? Number((((refundCount / revenue.totalOrders) * 100)).toFixed(2))
           : 0,
         totalOrders: revenue.totalOrders || 0,
-        avgOrderValue: revenue.avgOrderValue?.toFixed(2) || 0,
+        avgOrderValue: Number((revenue.avgOrderValue || 0).toFixed(2)),
+        // Operating expenses (REFUND-category rows excluded — see above).
+        // Includes DRIVER_PAYOUT rows, which markPayoutPaid now writes; they
+        // are dated when the payout was settled, so a payout can land in a
+        // different window from the trips that earned it.
         totalExpenses,
+        refundExpenses,
         netProfit: gross - refunds - totalExpenses,
-        profitMargin: gross > 0 ? (((gross - refunds - totalExpenses) / gross) * 100).toFixed(2) : 0,
+        profitMargin: gross > 0 ? Number(((((gross - refunds - totalExpenses) / gross) * 100)).toFixed(2)) : 0,
       },
       expenses: {
+        // Full category list, REFUND included, so the Expenses tab can still
+        // show refund payouts as their own line.
         byCategory: expenseData,
         total: totalExpenses,
+        refundExpenses,
       },
       paymentMethods,
       dailyRevenue,
@@ -308,7 +370,7 @@ export const getEnhancedOverview = async (req: Request, res: Response) => {
       },
       dso: {
         days: dso,
-        totalOutstanding: invoiceAging[0]?.totalOutstanding || 0,
+        totalOutstanding: outstanding,
         invoiceCount: invoiceAging[0]?.invoiceCount || 0,
         aging: {
           "0-30": invoiceAging[0]?.aging0to30 || 0,
@@ -475,13 +537,18 @@ export const getDSOMetrics = async (req: Request, res: Response) => {
       invoicesCollection
         .aggregate([
           {
+            // Only GENERATED exists in the Invoice status enum for an unpaid
+            // invoice; "SENT"/"OVERDUE" were never storable values.
             $match: {
-              status: { $in: ["GENERATED", "SENT", "OVERDUE"] },
+              status: { $in: ["GENERATED"] },
             },
           },
           {
             $project: {
-              amount: 1,
+              // `grandTotal` is the invoice total. Summing the non-existent
+              // `amount` path returned 0, which is why Total Outstanding and
+              // Overdue Amount both read ₹0 beside a real invoice count.
+              amount: { $ifNull: ["$grandTotal", 0] },
               enterpriseId: 1,
               daysOutstanding: {
                 $divide: [
@@ -489,9 +556,22 @@ export const getDSOMetrics = async (req: Request, res: Response) => {
                   1000 * 60 * 60 * 24,
                 ],
               },
+              // Overdue needs a real due date. `dueDate` is only set where a
+              // payment term actually exists (enterprise credit invoices, from
+              // Enterprise.paymentTerms — see invoice.service.generateInvoice).
+              // Invoices without one are NOT counted as overdue; the previous
+              // `now > $dueDate` compared against a missing field, which is
+              // true in BSON order, so every invoice counted as overdue.
               isOverdue: {
                 $cond: [
-                  { $gt: [new Date(), "$dueDate"] },
+                  {
+                    $and: [
+                      // $type is "missing" when the field is absent and "null"
+                      // when it is null — only a real date can be overdue.
+                      { $eq: [{ $type: "$dueDate" }, "date"] },
+                      { $gt: [new Date(), "$dueDate"] },
+                    ],
+                  },
                   true,
                   false,
                 ],
@@ -538,14 +618,15 @@ export const getDSOMetrics = async (req: Request, res: Response) => {
         .aggregate([
           {
             $match: {
-              status: { $in: ["GENERATED", "SENT", "OVERDUE"] },
+              status: { $in: ["GENERATED"] },
               enterpriseId: { $exists: true },
             },
           },
           {
             $group: {
               _id: "$enterpriseId",
-              outstanding: { $sum: "$amount" },
+              // `grandTotal`, not `amount` — see the pipeline above.
+              outstanding: { $sum: { $ifNull: ["$grandTotal", 0] } },
               count: { $sum: 1 },
             },
           },
@@ -571,19 +652,25 @@ export const getDSOMetrics = async (req: Request, res: Response) => {
         .toArray(),
     ]);
 
-    const totalRevenue90Days = revenueMetrics[0]?.totalRevenue || 1;
+    // No `|| 1` fallback: pretending ₹1 of 90-day revenue turned "no revenue"
+    // into a DSO of totalAR × 90 days. With no revenue in the window DSO is
+    // simply not computable, so report null rather than a made-up number.
+    const totalRevenue90Days = revenueMetrics[0]?.totalRevenue || 0;
     const avgDailyRevenue = totalRevenue90Days / 90;
     const totalAR = invoiceMetrics[0]?.totalAR || 0;
-    const dso = avgDailyRevenue > 0 ? (totalAR / avgDailyRevenue).toFixed(1) : 0;
+    const dso =
+      avgDailyRevenue > 0
+        ? Number((totalAR / avgDailyRevenue).toFixed(1))
+        : null;
 
     res.locals.data = {
-      dso: Number(dso),
+      dso,
       totalAccountsReceivable: totalAR,
-      avgDaysOutstanding: invoiceMetrics[0]?.avgDaysOutstanding?.toFixed(1) || 0,
+      avgDaysOutstanding: Number((invoiceMetrics[0]?.avgDaysOutstanding || 0).toFixed(1)),
       overdueAmount: invoiceMetrics[0]?.overdueAmount || 0,
       overdueInvoices: invoiceMetrics[0]?.overdueCount || 0,
       totalInvoices: invoiceMetrics[0]?.totalCount || 0,
-      avgDailyRevenue: avgDailyRevenue.toFixed(2),
+      avgDailyRevenue: Number(avgDailyRevenue.toFixed(2)),
       topEnterpriseAR: enterpriseAR,
     };
   } catch (err) {

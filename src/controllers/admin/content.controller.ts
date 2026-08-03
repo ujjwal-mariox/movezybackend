@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { Content } from "../../models/content.model";
+import { auditFromRequest } from "./audit-log.controller";
 
 /**
  * Legal / informational content management (Terms, Privacy, About, Refund,
@@ -93,6 +94,17 @@ export const updateContent = async (req: Request, res: Response) => {
     },
     { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
   );
+
+  // Republishing the Terms, Privacy or Refund policy is a legal change and was
+  // leaving no record of who published which version.
+  await auditFromRequest(req, {
+    action: "CONFIG_CHANGE",
+    module: "settings",
+    targetId: String(updated?._id || type),
+    targetType: "Content",
+    description: `Published ${type} content version ${updated?.version ?? "?"}`,
+    metadata: { type, version: updated?.version, title: updated?.title },
+  });
 
   res.locals.data = { message: "Content published", content: updated };
 };

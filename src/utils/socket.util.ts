@@ -4,7 +4,7 @@ import { createAdapter } from "@socket.io/redis-adapter";
 import jwt from "jsonwebtoken";
 import { Types } from "mongoose";
 import config from "../config";
-import { getRedisClient } from "./redis.util";
+import { getRedisClient, duplicateRedisClient } from "./redis.util";
 import ChatMessage from "../models/chat-message.model";
 
 interface AuthenticatedSocket extends Socket {
@@ -31,9 +31,11 @@ export const initSocket = async (httpServer: HttpServer): Promise<Server> => {
 
   // Use Redis adapter for horizontal scaling
   try {
-    const redisClient = getRedisClient();
-    const pubClient = redisClient.duplicate();
-    const subClient = redisClient.duplicate();
+    // duplicateRedisClient, not .duplicate(): a duplicate does not inherit the
+    // parent's 'error' listener, and an unhandled 'error' event can take the
+    // process down.
+    const pubClient = duplicateRedisClient("socket.io:pub");
+    const subClient = duplicateRedisClient("socket.io:sub");
     await Promise.all([pubClient.connect(), subClient.connect()]);
     io.adapter(createAdapter(pubClient, subClient));
     console.log("Socket.io: Redis adapter initialized");

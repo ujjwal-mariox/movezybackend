@@ -39,6 +39,102 @@ interface BookingDispatchResult {
   message: string;
 }
 
+/** A driver the geo layer says is near the pickup, before any filtering. */
+interface GeoCandidate {
+  driverId: string;
+  distanceKm: number;
+  lat: number;
+  lng: number;
+}
+
+/** Great-circle distance in km — used by the Mongo fallback, which (unlike
+ *  Redis GEOSEARCH) does not hand back the distance it matched on. */
+const haversineKm = (
+  aLat: number,
+  aLng: number,
+  bLat: number,
+  bLng: number,
+): number => {
+  const R = 6371;
+  const dLat = ((bLat - aLat) * Math.PI) / 180;
+  const dLng = ((bLng - aLng) * Math.PI) / 180;
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((aLat * Math.PI) / 180) *
+      Math.cos((bLat * Math.PI) / 180) *
+      Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+};
+
+/**
+ * Candidates from the Redis geo set. Throws if Redis is unavailable — the
+ * caller decides what to do about that.
+ */
+const candidatesFromRedis = async (
+  pickupLat: number,
+  pickupLng: number,
+  radiusKm: number,
+): Promise<GeoCandidate[]> => {
+  const redis = getRedisClient();
+  const rows = await redis.geoSearchWith(
+    "driver:locations",
+    { longitude: pickupLng, latitude: pickupLat },
+    { radius: radiusKm, unit: "km" },
+    ["WITHDIST", "WITHCOORD"],
+  );
+  return (rows || []).map((r) => ({
+    driverId: String(r.member),
+    distanceKm: parseFloat(String(r.distance ?? 0)),
+    lat: r.coordinates?.latitude ? Number(r.coordinates.latitude) : 0,
+    lng: r.coordinates?.longitude ? Number(r.coordinates.longitude) : 0,
+  }));
+};
+
+/** How stale a Mongo location may be and still count as "a driver who is here". */
+const FALLBACK_LOCATION_MAX_AGE_MS = 5 * 60 * 1000;
+
+/**
+ * Candidates from Mongo, using the 2dsphere index on DriverLocation.
+ *
+ * The geo set that dispatch searches lives ONLY in Redis, and the Redis lookup
+ * used to be the single source: any Redis error was caught and turned into an
+ * empty list, which is indistinguishable from "no drivers are near" — so a
+ * Redis outage silently stopped dispatching every booking to every driver,
+ * while the customer just saw the search spin. DriverLocation carries the same
+ * coordinates behind a 2dsphere index and is written on the same updates, so it
+ * can answer the question when Redis cannot. A staleness bound is applied
+ * because, unlike the Redis entries, these rows are not evicted when a driver's
+ * app stops reporting.
+ */
+const candidatesFromMongo = async (
+  pickupLat: number,
+  pickupLng: number,
+  radiusKm: number,
+): Promise<GeoCandidate[]> => {
+  const DriverLocation = (await import("../models/driver-location.model"))
+    .default;
+  const rows = await DriverLocation.find({
+    isOnline: true,
+    lastUpdated: { $gte: new Date(Date.now() - FALLBACK_LOCATION_MAX_AGE_MS) },
+    location: {
+      $near: {
+        $geometry: { type: "Point", coordinates: [pickupLng, pickupLat] },
+        $maxDistance: radiusKm * 1000,
+      },
+    },
+  })
+    .select("driverId latitude longitude")
+    .limit(50)
+    .lean();
+
+  return rows.map((r: any) => ({
+    driverId: String(r.driverId),
+    distanceKm: haversineKm(pickupLat, pickupLng, r.latitude, r.longitude),
+    lat: r.latitude,
+    lng: r.longitude,
+  }));
+};
+
 /**
  * Find nearby available drivers
  */
@@ -49,27 +145,39 @@ export const findNearbyDrivers = async (
   radiusKm: number = DRIVER_SEARCH_RADIUS_KM,
 ): Promise<NearbyDriver[]> => {
   try {
-    const redis = getRedisClient();
+    // Redis first — it is the live index. If it is unavailable, or simply has
+    // nothing (an empty or flushed geo set looks identical to "no drivers"),
+    // ask Mongo rather than reporting that nobody is available.
+    let candidates: GeoCandidate[] = [];
+    try {
+      candidates = await candidatesFromRedis(pickupLat, pickupLng, radiusKm);
+    } catch (err: any) {
+      console.warn(
+        "Dispatch: Redis geo lookup failed, falling back to Mongo —",
+        err?.message || err,
+      );
+    }
 
-    // Search for drivers within radius using Redis GeoSearch
-    const nearbyDriverIds = await redis.geoSearchWith(
-      "driver:locations",
-      { longitude: pickupLng, latitude: pickupLat },
-      { radius: radiusKm, unit: "km" },
-      ["WITHDIST", "WITHCOORD"],
-    );
+    if (candidates.length === 0) {
+      candidates = await candidatesFromMongo(pickupLat, pickupLng, radiusKm);
+      if (candidates.length > 0) {
+        console.log(
+          `Dispatch: Redis returned no drivers; Mongo fallback found ${candidates.length} within ${radiusKm}km`,
+        );
+      }
+    }
 
-    if (!nearbyDriverIds || nearbyDriverIds.length === 0) {
+    if (candidates.length === 0) {
       return [];
     }
 
     // Filter by availability and vehicle type
     const availableDrivers: NearbyDriver[] = [];
 
-    for (const result of nearbyDriverIds) {
-      const driverId = result.member;
-      const distance = result.distance || 0;
-      const coords = result.coordinates;
+    for (const result of candidates) {
+      const driverId = result.driverId;
+      const distance = result.distanceKm;
+      const coords = { latitude: result.lat, longitude: result.lng };
 
       // Check if driver is online and approved. NOTE: the approval field is
       // `status: "approved"` (lowercase) — the source of truth used everywhere

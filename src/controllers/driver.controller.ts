@@ -1285,6 +1285,17 @@ export const verifyPickupOtp = async (
     booking.status = "PICKED";
     booking.pickedAt = new Date();
 
+    // When we expect the goods delivered. Nothing had ever written this field,
+    // so the admin's "Delayed" dispatch queue (which filters on it) was always
+    // empty and on-time performance had nothing to measure against. Pickup is
+    // the exact moment the drop leg starts, and durationMin is that leg's road
+    // duration, so this is a real estimate rather than a padded guess.
+    if (booking.durationMin) {
+      booking.estimatedDropTime = new Date(
+        booking.pickedAt.getTime() + booking.durationMin * 60 * 1000,
+      );
+    }
+
     // ─── WAITING CHARGE ───
     // How long the driver waited at pickup: driverArrivedAt → pickedAt. This is
     // the only point where both timestamps exist, and it is before payment is

@@ -15,6 +15,7 @@ import GoodsType from "../../models/goods-type.model";
 import { City, BodyType, FuelType } from "../../models/master-data.model";
 import { uploadFileToAws } from "../../utils/s3";
 import { cache } from "../../utils/redis.util";
+import { auditFromRequest, diffFields } from "./audit-log.controller";
 
 /**
  * Coerce string booleans/numbers from multipart form-data into real types.
@@ -79,11 +80,25 @@ export const getFareConfig = async (req: Request, res: Response) => {
 export const updateFareConfig = async (req: Request, res: Response) => {
   const updateData = req.body;
 
+  // Read the live config BEFORE writing, so the audit row can carry the value
+  // that was replaced. Changing driver commission or GST left no record at all
+  // of who changed it or what it was.
+  const previous = await FareConfig.findOne({ isActive: true }).lean();
+
   const config = await FareConfig.findOneAndUpdate(
     { isActive: true },
     updateData,
-    { new: true, upsert: true },
+    { new: true, upsert: true, runValidators: true },
   );
+
+  await auditFromRequest(req, {
+    action: "CONFIG_CHANGE",
+    module: "settings",
+    targetId: String(config?._id || ""),
+    targetType: "FareConfig",
+    description: "Updated fare configuration",
+    changes: diffFields(previous as any, updateData),
+  });
 
   res.locals.data = {
     message: "Fare configuration updated",
@@ -135,6 +150,15 @@ export const createVehicleType = async (req: Request, res: Response) => {
 
   const vehicleType = await VehicleType.create(data);
 
+  await auditFromRequest(req, {
+    action: "CREATE",
+    module: "vehicles",
+    targetId: String(vehicleType._id),
+    targetType: "VehicleType",
+    description: `Created vehicle type "${vehicleType.name}"`,
+    after: { ...data },
+  });
+
   res.locals.data = {
     message: "Vehicle type created",
     vehicleType,
@@ -154,6 +178,10 @@ export const updateVehicleType = async (req: Request, res: Response) => {
     data.image = result.images;
   }
 
+  // Captured before the write so the audit row shows what the fare-affecting
+  // fields (baseFare, perKmRate, …) used to be.
+  const previous = await VehicleType.findById(id).lean();
+
   const vehicleType = await VehicleType.findByIdAndUpdate(id, data, {
     new: true,
   });
@@ -164,6 +192,15 @@ export const updateVehicleType = async (req: Request, res: Response) => {
       message: "Vehicle type not found",
     });
   }
+
+  await auditFromRequest(req, {
+    action: "UPDATE",
+    module: "vehicles",
+    targetId: String(vehicleType._id),
+    targetType: "VehicleType",
+    description: `Updated vehicle type "${vehicleType.name}"`,
+    changes: diffFields(previous as any, data),
+  });
 
   res.locals.data = {
     message: "Vehicle type updated",
@@ -188,6 +225,21 @@ export const toggleVehicleType = async (req: Request, res: Response) => {
 
   vehicleType.isActive = !vehicleType.isActive;
   await vehicleType.save();
+
+  await auditFromRequest(req, {
+    action: "CHANGE_STATUS",
+    module: "vehicles",
+    targetId: String(vehicleType._id),
+    targetType: "VehicleType",
+    description: `${vehicleType.isActive ? "Activated" : "Deactivated"} vehicle type "${vehicleType.name}"`,
+    changes: [
+      {
+        field: "isActive",
+        oldValue: !vehicleType.isActive,
+        newValue: vehicleType.isActive,
+      },
+    ],
+  });
 
   res.locals.data = {
     message: `Vehicle type ${vehicleType.isActive ? "activated" : "deactivated"}`,
@@ -214,6 +266,14 @@ export const deleteVehicleType = async (req: Request, res: Response) => {
     });
   }
 
+  await auditFromRequest(req, {
+    action: "DELETE",
+    module: "vehicles",
+    targetId: String(vehicleType._id),
+    targetType: "VehicleType",
+    description: `Deleted vehicle type "${vehicleType.name}"`,
+  });
+
   res.locals.data = {
     message: "Vehicle type deleted",
     vehicleType,
@@ -238,6 +298,14 @@ export const restoreVehicleType = async (req: Request, res: Response) => {
       message: "Vehicle type not found",
     });
   }
+
+  await auditFromRequest(req, {
+    action: "UPDATE",
+    module: "vehicles",
+    targetId: String(vehicleType._id),
+    targetType: "VehicleType",
+    description: `Restored vehicle type "${vehicleType.name}"`,
+  });
 
   res.locals.data = {
     message: "Vehicle type restored",
@@ -313,8 +381,19 @@ export const getAddonServices = async (req: Request, res: Response) => {
  * Create addon service
  */
 export const createAddonService = async (req: Request, res: Response) => {
-  const addon = await AddonService.create(req.body);
+  // `req.body` is untyped, so Model.create resolves to its array overload —
+  // annotate the single document we actually get back.
+  const addon: any = await AddonService.create(req.body);
   await cache.del("addons:active");
+
+  await auditFromRequest(req, {
+    action: "CREATE",
+    module: "settings",
+    targetId: String(addon._id),
+    targetType: "AddonService",
+    description: `Created add-on "${addon.name}" at ${addon.price} (${addon.priceType})`,
+    after: { name: addon.name, price: addon.price, priceType: addon.priceType },
+  });
 
   res.locals.data = {
     message: "Addon service created",
@@ -328,10 +407,23 @@ export const createAddonService = async (req: Request, res: Response) => {
 export const updateAddonService = async (req: Request, res: Response) => {
   const { id } = req.params;
 
+  // An add-on's price and priceType are billed on every booking that uses it,
+  // so the previous values have to be on record.
+  const previous = await AddonService.findById(id).lean();
+
   const addon = await AddonService.findByIdAndUpdate(id, req.body, {
     new: true,
   });
   await cache.del("addons:active");
+
+  await auditFromRequest(req, {
+    action: "CONFIG_CHANGE",
+    module: "settings",
+    targetId: String(id),
+    targetType: "AddonService",
+    description: `Updated add-on "${addon?.name ?? id}"`,
+    changes: diffFields(previous as any, req.body),
+  });
 
   res.locals.data = {
     message: "Addon service updated",
@@ -398,6 +490,15 @@ export const createCancellationReason = async (req: Request, res: Response) => {
     sortOrder: sortOrder ?? 0,
   });
 
+  await auditFromRequest(req, {
+    action: "CREATE",
+    module: "settings",
+    targetId: String(newReason._id),
+    targetType: "CancellationReason",
+    description: `Created cancellation reason ${newReason.code} — refunds ${newReason.refundPercentage}%`,
+    after: newReason.toObject(),
+  });
+
   res.locals.data = {
     message: "Cancellation reason created",
     reason: newReason,
@@ -419,11 +520,24 @@ export const updateCancellationReason = async (req: Request, res: Response) => {
     updateData.code = updateData.code.toUpperCase();
   }
 
+  // Before-image for the audit trail: refundPercentage and penaltyValue decide
+  // real money on every cancellation, so an edit has to be attributable.
+  const previous = await CancellationReason.findById(id).lean();
+
   const reason = await CancellationReason.findByIdAndUpdate(id, updateData, { new: true, runValidators: true });
   if (!reason) {
     res.status(404);
     throw new Error("Cancellation reason not found");
   }
+
+  await auditFromRequest(req, {
+    action: "CONFIG_CHANGE",
+    module: "settings",
+    targetId: String(reason._id),
+    targetType: "CancellationReason",
+    description: `Updated cancellation reason ${reason.code}`,
+    changes: diffFields(previous as any, updateData),
+  });
 
   res.locals.data = {
     message: "Cancellation reason updated",
@@ -449,6 +563,14 @@ export const deleteCancellationReason = async (req: Request, res: Response) => {
     res.status(404);
     throw new Error("Cancellation reason not found");
   }
+
+  await auditFromRequest(req, {
+    action: "DELETE",
+    module: "settings",
+    targetId: String(reason._id),
+    targetType: "CancellationReason",
+    description: `Deactivated cancellation reason ${reason.code}`,
+  });
 
   res.locals.data = {
     message: "Cancellation reason deleted",
@@ -593,6 +715,16 @@ export const toggleAddonService = async (req: Request, res: Response) => {
   addon.isActive = !addon.isActive;
   await addon.save();
   await cache.del("addons:active");
+  await auditFromRequest(req, {
+    action: "CHANGE_STATUS",
+    module: "settings",
+    targetId: String(addon._id),
+    targetType: "AddonService",
+    description: `${addon.isActive ? "Activated" : "Deactivated"} add-on "${addon.name}"`,
+    changes: [
+      { field: "isActive", oldValue: !addon.isActive, newValue: addon.isActive },
+    ],
+  });
   res.locals.data = { message: `Addon ${addon.isActive ? "activated" : "deactivated"}`, addon };
 };
 
@@ -601,8 +733,19 @@ export const toggleAddonService = async (req: Request, res: Response) => {
  */
 export const deleteAddonService = async (req: Request, res: Response) => {
   const { id } = req.params;
-  await AddonService.findByIdAndDelete(id);
+  // Hard delete — capture what was removed before it is gone.
+  const removed = await AddonService.findByIdAndDelete(id);
   await cache.del("addons:active");
+  await auditFromRequest(req, {
+    action: "DELETE",
+    module: "settings",
+    targetId: String(id),
+    targetType: "AddonService",
+    description: `Deleted add-on "${removed?.name ?? id}"`,
+    before: removed
+      ? { name: removed.name, price: removed.price, priceType: removed.priceType }
+      : undefined,
+  });
   res.locals.data = { message: "Addon deleted" };
 };
 
@@ -629,6 +772,9 @@ export const updateAppSetting = async (req: Request, res: Response) => {
   const { key } = req.params;
   const { value } = req.body;
 
+  // Before-image for the audit row.
+  const previousValue = (await AppConfig.findOne({ key }).lean())?.value;
+
   const setting = await AppConfig.findOneAndUpdate(
     { key },
     { value },
@@ -644,6 +790,15 @@ export const updateAppSetting = async (req: Request, res: Response) => {
 
   // Invalidate cached config value
   await cache.del(`config:${key}`);
+
+  await auditFromRequest(req, {
+    action: "CONFIG_CHANGE",
+    module: "settings",
+    targetId: key,
+    targetType: "AppConfig",
+    description: `Updated app setting ${key}`,
+    changes: [{ field: "value", oldValue: previousValue, newValue: value }],
+  });
 
   res.locals.data = {
     message: "Setting updated",

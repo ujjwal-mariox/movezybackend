@@ -33,6 +33,8 @@ export interface ISOSAlert {
   }[];
   policeNotified: boolean;
   policeNotifiedAt?: Date;
+  /** Admin who recorded that they contacted the police. */
+  policeNotifiedBy?: Types.ObjectId;
   audioRecordingUrl?: string;
   createdAt: Date;
   updatedAt: Date;
@@ -142,6 +144,7 @@ const SOSAlertSchema = new Schema<ISOSAlert>(
       default: false,
     },
     policeNotifiedAt: Date,
+    policeNotifiedBy: { type: Schema.Types.ObjectId, ref: "Admin" },
     audioRecordingUrl: String,
   },
   {

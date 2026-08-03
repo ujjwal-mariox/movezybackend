@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { AuditLog } from "../models/audit-log.model";
+import { auditFromRequest } from "../controllers/admin/audit-log.controller";
 
 // Actions that require mandatory comments
 const MANDATORY_COMMENT_ACTIONS = [
@@ -65,6 +65,34 @@ export const requireComment = (options: CommentRequiredOptions) => {
 };
 
 /**
+ * The granular action strings this middleware is wired with ("refund:approve_l1",
+ * "cod:settle", …) are NOT values of the AuditLog `action` enum, and the schema
+ * also requires adminName, adminEmail, module and description. The old raw
+ * AuditLog.create({ adminId, action, resourceType, resourceId, details,
+ * timestamp }) therefore threw a ValidationError on EVERY call, which the
+ * `.catch` logged and swallowed — so refund approvals and COD settlements
+ * produced no audit row at all. Map to a valid enum action + module here and
+ * keep the granular string in metadata.
+ */
+const AUDIT_ACTION_MAP: Record<string, { action: string; module: string }> = {
+  "refund:request": { action: "CREATE", module: "payments" },
+  "refund:approve": { action: "APPROVE", module: "payments" },
+  "refund:approve_l1": { action: "APPROVE", module: "payments" },
+  "refund:approve_l2": { action: "APPROVE", module: "payments" },
+  "refund:reject": { action: "REJECT", module: "payments" },
+  "payout:reject": { action: "REJECT", module: "payments" },
+  "cod:settle": { action: "UPDATE", module: "payments" },
+  "credit:adjust": { action: "UPDATE", module: "enterprises" },
+  "credit:update_limit": { action: "UPDATE", module: "enterprises" },
+  "driver:reject": { action: "REJECT", module: "drivers" },
+  "driver:suspend": { action: "SUSPEND", module: "drivers" },
+  "enterprise:reject": { action: "REJECT", module: "enterprises" },
+  "enterprise:suspend": { action: "SUSPEND", module: "enterprises" },
+  "user:block": { action: "BLOCK", module: "users" },
+  "booking:cancel": { action: "UPDATE", module: "bookings" },
+};
+
+/**
  * Middleware to audit log sensitive actions with comments
  */
 export const auditAction = (action: string, resourceType: string) => {
@@ -73,25 +101,31 @@ export const auditAction = (action: string, resourceType: string) => {
     const originalJson = res.json.bind(res);
 
     res.json = (data: any) => {
-      // Only log if response was successful
+      // Only log if response was successful. Note the routes here answer through
+      // ResponseMiddleware as { code, message, data }, where code 0/3/4/5 also
+      // set a 4xx status — hence the statusCode check.
       if (data?.success !== false && res.statusCode < 400) {
-        const logEntry = {
-          adminId: req.adminId,
-          action,
-          resourceType,
-          resourceId: req.params.id || data?.data?.id || data?.data?._id,
-          details: {
-            comment: req.body._validatedComment || req.body.comment || req.body.reason,
-            requestBody: sanitizeRequestBody(req.body),
-            ip: req.ip || req.socket.remoteAddress,
-            userAgent: req.headers["user-agent"],
-          },
-          timestamp: new Date(),
+        const mapped = AUDIT_ACTION_MAP[action] || {
+          action: "UPDATE",
+          module: "payments",
         };
+        const comment =
+          req.body._validatedComment || req.body.comment || req.body.reason;
 
-        // Fire and forget - don't block response
-        AuditLog.create(logEntry).catch((err: Error) => {
-          console.error("[AuditLog] Failed to create audit log:", err);
+        // Fire and forget — auditFromRequest never throws.
+        void auditFromRequest(req, {
+          action: mapped.action,
+          module: mapped.module,
+          targetId: String(
+            req.params.id || data?.data?.id || data?.data?._id || "",
+          ),
+          targetType: resourceType,
+          description: `${action} on ${resourceType}${comment ? ` — ${comment}` : ""}`,
+          metadata: {
+            granularAction: action,
+            comment,
+            requestBody: sanitizeRequestBody(req.body),
+          },
         });
       }
 

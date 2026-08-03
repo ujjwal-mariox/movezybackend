@@ -85,6 +85,16 @@ export const markCoinPayoutPaid = async (req: Request, res: Response) => {
     });
   }
 
+  // Four eyes on money out, same rule as driver payouts: whoever approved the
+  // request cannot also be the one who records it as paid.
+  if (String(payout.approvedBy) === String(adminId(req))) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "You approved this payout, so a different admin must mark it paid.",
+    });
+  }
+
   payout.status = "PAID";
   payout.reference = String(reference).trim();
   payout.paidBy = adminId(req);

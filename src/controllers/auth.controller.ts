@@ -1,5 +1,10 @@
 import { Request, Response, NextFunction } from "express";
-import { v4 as uuidv4 } from "uuid";
+// Node's built-in RFC 4122 v4 generator, not the `uuid` package. uuid v13 is
+// ESM-only, so the CommonJS output this project compiles to could not require()
+// it on any Node older than 20.19 — it booted locally on 22.x and crashed on a
+// 20.18 host. crypto.randomUUID has been available since Node 14.17 and needs
+// no dependency at all.
+import { randomUUID } from "crypto";
 
 import * as UserService from "../services/user.service";
 import * as SmsService from "../services/sms.service";
@@ -47,7 +52,7 @@ export const login = async (
     }
   }
 
-  const newTxnId = uuidv4();
+  const newTxnId = randomUUID();
 
   const otpData = {
     txnId: newTxnId,
@@ -159,7 +164,7 @@ export const resendOtp = async (
   const otp = helpers().generateOTP();
   const user = await UserService.fetchByQuery({ countryCode, mobileNumber });
 
-  const newTxnId = uuidv4();
+  const newTxnId = randomUUID();
 
   const otpData = {
     txnId: newTxnId,
@@ -192,13 +197,21 @@ export const logout = async (
   next: NextFunction
 ) => {
 
-  const { userId } = req.body;
+  // The caller is whoever the token says they are. This read `req.body.userId`,
+  // but /logout is a GET — there is no body, so userId was always undefined and
+  // the update below never named a user. verifyUserToken puts the authenticated
+  // id on the request itself.
+  const userId = (req as any).userId;
 
-  await UserService.updateUsers(userId, {
-    deviceToken: null,
-    deviceType: null,
-    token: null,
-  });
+  // Clear the push token so a logged-out device stops receiving notifications.
+  // This used to write deviceToken/deviceType/token — none of which are declared
+  // on the User schema — so strict mode dropped the whole update and logout did
+  // nothing at all. `fcmToken` is the field push actually reads.
+  if (userId) {
+    await UserService.updateUsers(userId, {
+      fcmToken: null,
+    });
+  }
 
   req.msg = "logout";
   next();

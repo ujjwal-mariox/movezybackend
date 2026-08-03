@@ -31,7 +31,10 @@ import * as SessionController from "../controllers/admin/session.controller";
 import AdminAuthMiddleware from "../middlewares/admin-auth.middleware";
 import ErrorHandlerMiddleware from "../middlewares/error-handler.middleware";
 import ResponseMiddleware from "../middlewares/response.middleware";
-import { requireCommentAndAudit } from "../middlewares/mandatory-comment.middleware";
+import {
+  requireComment,
+  requireCommentAndAudit,
+} from "../middlewares/mandatory-comment.middleware";
 import upload from "../middlewares/upload.middleware";
 import { PERMISSIONS } from "../models/role.model";
 
@@ -449,6 +452,10 @@ adminRouter.put(
   "/bookings/:id/cancel",
   verifyAdminToken,
   requirePermission(PERMISSIONS.BOOKINGS_UPDATE),
+  // Cancelling someone's trip — often with a refund attached — was the one
+  // destructive booking action with no mandatory reason and no audit row.
+  // "booking:cancel" is already in MANDATORY_COMMENT_ACTIONS.
+  ...requireCommentAndAudit("booking:cancel", "Booking"),
   ErrorHandlerMiddleware(BookingController.cancelBooking),
   ResponseMiddleware,
 );
@@ -1578,28 +1585,33 @@ adminRouter.get(
 adminRouter.post(
   "/finance/payouts",
   verifyAdminToken,
-  requirePermission(PERMISSIONS.FINANCE_VIEW),
+  requirePermission(PERMISSIONS.PAYOUTS_CREATE),
   ErrorHandlerMiddleware(PayoutController.createPayout),
   ResponseMiddleware,
 );
 adminRouter.put(
   "/finance/payouts/:id/approve",
   verifyAdminToken,
-  requirePermission(PERMISSIONS.FINANCE_VIEW),
+  requirePermission(PERMISSIONS.PAYOUTS_APPROVE),
   ErrorHandlerMiddleware(PayoutController.approvePayout),
   ResponseMiddleware,
 );
 adminRouter.put(
   "/finance/payouts/:id/pay",
   verifyAdminToken,
-  requirePermission(PERMISSIONS.FINANCE_VIEW),
+  requirePermission(PERMISSIONS.PAYOUTS_PAY),
   ErrorHandlerMiddleware(PayoutController.markPayoutPaid),
   ResponseMiddleware,
 );
 adminRouter.put(
   "/finance/payouts/:id/reject",
   verifyAdminToken,
-  requirePermission(PERMISSIONS.FINANCE_VIEW),
+  requirePermission(PERMISSIONS.PAYOUTS_APPROVE),
+  // "payout:reject" is already listed in MANDATORY_COMMENT_ACTIONS but the route
+  // never enforced it, so every rejection fell back to "Rejected by admin" and
+  // the driver was told nothing. Comment only — rejectPayout writes its own
+  // audit row, so auditAction here would duplicate it.
+  requireComment({ action: "payout:reject" }),
   ErrorHandlerMiddleware(PayoutController.rejectPayout),
   ResponseMiddleware,
 );
@@ -1617,21 +1629,24 @@ adminRouter.get(
 adminRouter.put(
   "/finance/coin-payouts/:id/approve",
   verifyAdminToken,
-  requirePermission(PERMISSIONS.FINANCE_VIEW),
+  requirePermission(PERMISSIONS.PAYOUTS_APPROVE),
   ErrorHandlerMiddleware(CoinPayoutController.approveCoinPayout),
   ResponseMiddleware,
 );
 adminRouter.put(
   "/finance/coin-payouts/:id/pay",
   verifyAdminToken,
-  requirePermission(PERMISSIONS.FINANCE_VIEW),
+  requirePermission(PERMISSIONS.PAYOUTS_PAY),
   ErrorHandlerMiddleware(CoinPayoutController.markCoinPayoutPaid),
   ResponseMiddleware,
 );
 adminRouter.put(
   "/finance/coin-payouts/:id/reject",
   verifyAdminToken,
-  requirePermission(PERMISSIONS.FINANCE_VIEW),
+  requirePermission(PERMISSIONS.PAYOUTS_APPROVE),
+  // Rejecting refunds the customer's coins — same mandatory comment + audit row
+  // as a driver payout rejection.
+  ...requireCommentAndAudit("payout:reject", "CoinPayout"),
   ErrorHandlerMiddleware(CoinPayoutController.rejectCoinPayout),
   ResponseMiddleware,
 );

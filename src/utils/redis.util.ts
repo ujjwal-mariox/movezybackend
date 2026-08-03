@@ -3,6 +3,11 @@ import config from "../config";
 
 let client: RedisClientType | null = null;
 
+// One warning per outage rather than one per call: the delay-detection sweep
+// alone hit a closed client several times a minute and buried everything else.
+// Reset when Redis reconnects, so the next outage is reported again.
+let warnedUnavailable = false;
+
 /**
  * Initialize Redis connection
  */
@@ -12,21 +17,41 @@ export const initRedis = async (): Promise<RedisClientType> => {
   client = createClient({
     url: config.redis.url,
     socket: {
-      reconnectStrategy: (retries) => {
-        if (retries > 10) {
-          console.error("Redis: Max reconnection attempts reached");
-          return new Error("Max retries reached");
-        }
-        return Math.min(retries * 100, 3000);
-      },
+      // Never stop trying. Returning an Error here makes node-redis abandon the
+      // connection permanently, so a transient DNS failure or a brief Upstash
+      // blip disabled the cache for the entire lifetime of the process — it
+      // only ever came back with a redeploy. A cache should reconnect forever;
+      // the callers degrade gracefully in the meantime.
+      reconnectStrategy: (retries) => Math.min(retries * 200, 30_000),
     },
   });
 
-  client.on("error", (err) => console.error("Redis Client Error:", err));
-  client.on("connect", () => console.log("Redis: Connected"));
-  client.on("reconnecting", () => console.log("Redis: Reconnecting..."));
+  // node-redis emits 'error' on every failed reconnect attempt. Unthrottled that
+  // is a line every few seconds forever, which buried real errors in the log.
+  let lastErrorLoggedAt = 0;
+  client.on("error", (err) => {
+    const now = Date.now();
+    if (now - lastErrorLoggedAt > 60_000) {
+      lastErrorLoggedAt = now;
+      console.error("Redis Client Error (throttled to 1/min):", err?.message || err);
+    }
+  });
+  client.on("connect", () => {
+    warnedUnavailable = false; // let the next outage warn again
+    console.log("Redis: Connected");
+  });
+  client.on("reconnecting", () => {});
 
-  await client.connect();
+  // Do not let a dead cache block startup. connect() rejects when the host does
+  // not resolve, which took the whole API down over an optional dependency.
+  try {
+    await client.connect();
+  } catch (err) {
+    console.warn(
+      "Redis: initial connect failed — starting without a cache and retrying in the background.",
+      err instanceof Error ? err.message : err,
+    );
+  }
   return client;
 };
 
@@ -41,81 +66,180 @@ export const getRedisClient = (): RedisClientType => {
 };
 
 /**
- * Cache utilities
+ * Duplicate the client for a dedicated connection (pub/sub, the Socket.io
+ * adapter — these cannot share the command connection).
+ *
+ * ALWAYS use this rather than calling .duplicate() directly. A duplicate does
+ * NOT inherit the parent's listeners, so an unhandled 'error' event is emitted
+ * as a bare EventEmitter error — node-redis prints "missing 'error' handler on
+ * this Redis client", and on an unhandled 'error' Node can terminate the
+ * process. That stayed hidden while the reconnect strategy gave up after ten
+ * attempts; now that it retries indefinitely, a duplicate without a handler
+ * would emit forever.
+ */
+export const duplicateRedisClient = (label: string): RedisClientType => {
+  const dup = getRedisClient().duplicate();
+  let lastLoggedAt = 0;
+  dup.on("error", (err) => {
+    const now = Date.now();
+    if (now - lastLoggedAt > 60_000) {
+      lastLoggedAt = now;
+      console.error(
+        `Redis (${label}) error (throttled to 1/min):`,
+        err?.message || err,
+      );
+    }
+  });
+  return dup as RedisClientType;
+};
+
+/**
+ * Is Redis usable right now? A client that has never been initialised, or whose
+ * socket has closed, is not.
+ */
+const redisReady = (): boolean => !!client && client.isOpen;
+
+const noteUnavailable = (op: string, err?: unknown) => {
+  if (!warnedUnavailable) {
+    warnedUnavailable = true;
+    console.warn(
+      `Redis unavailable (${op}) — cache reads will miss and cache writes are skipped ` +
+        `until it reconnects. This degrades performance, not correctness.`,
+      err instanceof Error ? err.message : "",
+    );
+  }
+};
+
+/**
+ * Cache utilities.
+ *
+ * These treat Redis as what it is — a cache. A closed or erroring client means a
+ * MISS (reads) or a NO-OP (writes), never an exception. Previously every method
+ * called getRedisClient() and used it straight away, so losing Redis threw
+ * ClientClosedError out of the vehicle-type, addon, goods-type, cancellation-
+ * reason and prohibited-item endpoints — the customer app's entire booking
+ * catalogue — and out of every admin config save, which had already written to
+ * Mongo and so reported failure for a change that had actually been applied.
+ *
+ * `incr` is deliberately NOT in here: a counter is not a cache, and silently
+ * returning a stale or restarted sequence is worse than failing. See
+ * booking-number.service.ts, which no longer uses Redis at all.
  */
 export const cache = {
   /**
-   * Get cached value
+   * Get cached value. Returns null on a miss AND when Redis is unavailable.
    */
   async get<T>(key: string): Promise<T | null> {
-    const redis = getRedisClient();
-    const value = await redis.get(key);
-    if (!value) return null;
+    if (!redisReady()) {
+      noteUnavailable("get");
+      return null;
+    }
     try {
-      return JSON.parse(value) as T;
-    } catch {
-      return value as unknown as T;
+      const value = await client!.get(key);
+      if (!value) return null;
+      try {
+        return JSON.parse(value) as T;
+      } catch {
+        return value as unknown as T;
+      }
+    } catch (err) {
+      noteUnavailable("get", err);
+      return null;
     }
   },
 
   /**
-   * Set cached value with optional TTL (in seconds)
+   * Set cached value with optional TTL (in seconds). No-op if Redis is down.
    */
   async set(key: string, value: any, ttlSeconds?: number): Promise<void> {
-    const redis = getRedisClient();
-    const stringValue = typeof value === "string" ? value : JSON.stringify(value);
-    if (ttlSeconds) {
-      await redis.setEx(key, ttlSeconds, stringValue);
-    } else {
-      await redis.set(key, stringValue);
+    if (!redisReady()) {
+      noteUnavailable("set");
+      return;
+    }
+    try {
+      const stringValue =
+        typeof value === "string" ? value : JSON.stringify(value);
+      if (ttlSeconds) {
+        await client!.setEx(key, ttlSeconds, stringValue);
+      } else {
+        await client!.set(key, stringValue);
+      }
+    } catch (err) {
+      noteUnavailable("set", err);
     }
   },
 
   /**
-   * Delete cached value
+   * Delete cached value. A failed invalidation is safe: the entry still expires
+   * on its TTL, and the caller has already written the authoritative row.
    */
   async del(key: string): Promise<void> {
-    const redis = getRedisClient();
-    await redis.del(key);
+    if (!redisReady()) {
+      noteUnavailable("del");
+      return;
+    }
+    try {
+      await client!.del(key);
+    } catch (err) {
+      noteUnavailable("del", err);
+    }
   },
 
   /**
    * Delete multiple keys by pattern using SCAN (non-blocking)
    */
   async delPattern(pattern: string): Promise<void> {
-    const redis = getRedisClient();
-    let cursor: string = "0";
-    do {
-      const result = await redis.scan(cursor, { MATCH: pattern, COUNT: 100 });
-      cursor = result.cursor.toString();
-      if (result.keys.length > 0) {
-        await redis.del(result.keys);
-      }
-    } while (cursor !== "0");
+    if (!redisReady()) {
+      noteUnavailable("delPattern");
+      return;
+    }
+    try {
+      let cursor: string = "0";
+      do {
+        const result = await client!.scan(cursor, {
+          MATCH: pattern,
+          COUNT: 100,
+        });
+        cursor = result.cursor.toString();
+        if (result.keys.length > 0) {
+          await client!.del(result.keys);
+        }
+      } while (cursor !== "0");
+    } catch (err) {
+      noteUnavailable("delPattern", err);
+    }
   },
 
   /**
-   * Check if key exists
+   * Check if key exists. False when Redis is unavailable — callers must treat
+   * this as "not cached", never as "confirmed absent".
    */
   async exists(key: string): Promise<boolean> {
-    const redis = getRedisClient();
-    return (await redis.exists(key)) === 1;
-  },
-
-  /**
-   * Increment counter
-   */
-  async incr(key: string): Promise<number> {
-    const redis = getRedisClient();
-    return await redis.incr(key);
+    if (!redisReady()) {
+      noteUnavailable("exists");
+      return false;
+    }
+    try {
+      return (await client!.exists(key)) === 1;
+    } catch (err) {
+      noteUnavailable("exists", err);
+      return false;
+    }
   },
 
   /**
    * Set expiry on existing key
    */
   async expire(key: string, seconds: number): Promise<void> {
-    const redis = getRedisClient();
-    await redis.expire(key, seconds);
+    if (!redisReady()) {
+      noteUnavailable("expire");
+      return;
+    }
+    try {
+      await client!.expire(key, seconds);
+    } catch (err) {
+      noteUnavailable("expire", err);
+    }
   },
 };
 
@@ -235,7 +359,7 @@ export const pubsub = {
     channel: string,
     callback: (message: any) => void
   ): Promise<void> {
-    const subscriber = getRedisClient().duplicate();
+    const subscriber = duplicateRedisClient(`subscribe:${channel}`);
     await subscriber.connect();
     
     await subscriber.subscribe(channel, (message) => {

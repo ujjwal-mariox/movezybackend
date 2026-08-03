@@ -41,6 +41,15 @@ export interface IInvoice {
   status: "GENERATED" | "PAID" | "CANCELLED" | "REFUNDED";
   pdfUrl?: string;
   generatedAt: Date;
+  /**
+   * When payment is contractually due. Only set where a payment term actually
+   * exists — enterprise credit invoices, from Enterprise.paymentTerms. Retail
+   * invoices are settled at the trip, so they carry no term and must never be
+   * reported as overdue. Finance's DSO/aging read this field; before it existed
+   * they compared against a missing path, which is "greater than" any date in
+   * BSON order, so every invoice counted as overdue.
+   */
+  dueDate?: Date;
   paidAt?: Date;
 }
 
@@ -114,6 +123,8 @@ const InvoiceSchema = new Schema<IInvoice>(
       type: Date,
       default: Date.now,
     },
+    // Set only for enterprise credit invoices — see IInvoice.dueDate.
+    dueDate: { type: Date, index: true },
     paidAt: Date,
   },
   { timestamps: true },

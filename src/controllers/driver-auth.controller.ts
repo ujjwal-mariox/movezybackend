@@ -1,5 +1,10 @@
 import { Request, Response, NextFunction } from "express";
-import { v4 as uuidv4 } from "uuid";
+// Node's built-in RFC 4122 v4 generator, not the `uuid` package. uuid v13 is
+// ESM-only, so the CommonJS output this project compiles to could not require()
+// it on any Node older than 20.19 — it booted locally on 22.x and crashed on a
+// 20.18 host. crypto.randomUUID has been available since Node 14.17 and needs
+// no dependency at all.
+import { randomUUID } from "crypto";
 import { Types } from "mongoose";
 
 import * as DriverService from "../services/driver.service";
@@ -44,7 +49,7 @@ export const driverLogin = async (
     }
   }
 
-  const newTxnId = uuidv4();
+  const newTxnId = randomUUID();
 
   const otpData = {
     txnId: newTxnId,
@@ -968,7 +973,7 @@ export const resendDriverOtp = async (
   const { mobileNumber, countryCode = "+91" } = req.body;
 
   const otp = helpers().generateOTP();
-  const newTxnId = uuidv4();
+  const newTxnId = randomUUID();
 
   const otpData = {
     txnId: newTxnId,
@@ -1018,10 +1023,14 @@ export const driverLogout = async (
 
   const driverId = (req as any).driverId;
 
-  // Update driver to offline
+  // Offline, and drop the push token: a logged-out driver kept receiving ride
+  // dispatch notifications on a device that could no longer accept them.
+  // `fcmToken` is typed `string | undefined`, but an undefined value is dropped
+  // from a Mongoose update — null is what actually clears the stored token.
   await DriverService.updateDriver(driverId, {
     isOnline: false,
-  });
+    fcmToken: null,
+  } as any);
 
   req.msg = "logout_success";
   next();
