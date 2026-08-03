@@ -4,7 +4,11 @@ import { createAdapter } from "@socket.io/redis-adapter";
 import jwt from "jsonwebtoken";
 import { Types } from "mongoose";
 import config from "../config";
-import { getRedisClient, duplicateRedisClient } from "./redis.util";
+import {
+  getRedisClient,
+  duplicateRedisClient,
+  connectWithTimeout,
+} from "./redis.util";
 import ChatMessage from "../models/chat-message.model";
 
 interface AuthenticatedSocket extends Socket {
@@ -34,9 +38,21 @@ export const initSocket = async (httpServer: HttpServer): Promise<Server> => {
     // duplicateRedisClient, not .duplicate(): a duplicate does not inherit the
     // parent's 'error' listener, and an unhandled 'error' event can take the
     // process down.
+    //
+    // connectWithTimeout, not a bare connect(): the reconnect strategy retries
+    // forever, so against an unreachable Redis these promises never settle and
+    // this await blocked the server from ever reaching listen(). The adapter is
+    // only needed to fan out socket events ACROSS instances — a single instance
+    // works fine without it, so a timeout here costs nothing.
     const pubClient = duplicateRedisClient("socket.io:pub");
     const subClient = duplicateRedisClient("socket.io:sub");
-    await Promise.all([pubClient.connect(), subClient.connect()]);
+    const [pubOk, subOk] = await Promise.all([
+      connectWithTimeout(pubClient, "socket.io:pub"),
+      connectWithTimeout(subClient, "socket.io:sub"),
+    ]);
+    if (!pubOk || !subOk) {
+      throw new Error("Redis adapter unavailable");
+    }
     io.adapter(createAdapter(pubClient, subClient));
     console.log("Socket.io: Redis adapter initialized");
   } catch (error) {

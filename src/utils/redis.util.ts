@@ -42,17 +42,54 @@ export const initRedis = async (): Promise<RedisClientType> => {
   });
   client.on("reconnecting", () => {});
 
-  // Do not let a dead cache block startup. connect() rejects when the host does
-  // not resolve, which took the whole API down over an optional dependency.
+  // Do not let a dead cache block startup.
+  //
+  // Two failure modes, both of which used to take the API down:
+  //  1. connect() REJECTS (host does not resolve) — caught below.
+  //  2. connect() NEVER SETTLES. Because the reconnect strategy above retries
+  //     forever, an unreachable host means the promise simply never resolves,
+  //     so `await initRedis()` hung and the server never reached listen() —
+  //     the host reported "no open ports" and killed the deploy. A rejection
+  //     handler cannot catch a promise that never settles, so bound it in time.
+  await connectWithTimeout(client, "primary");
+  return client;
+};
+
+/** How long to wait for an initial Redis connection before carrying on without it. */
+const CONNECT_TIMEOUT_MS = 5000;
+
+/**
+ * Connect, but never block startup for more than CONNECT_TIMEOUT_MS. On timeout
+ * the client is left connecting in the background — the reconnect strategy keeps
+ * trying, and every cache path already degrades to a miss until it succeeds.
+ */
+export const connectWithTimeout = async (
+  c: RedisClientType,
+  label: string,
+  ms: number = CONNECT_TIMEOUT_MS,
+): Promise<boolean> => {
+  let timer: NodeJS.Timeout | undefined;
   try {
-    await client.connect();
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`timed out after ${ms}ms`)),
+        ms,
+      );
+      // Do not hold the event loop open on account of this timer.
+      timer.unref?.();
+    });
+    await Promise.race([c.connect(), timeout]);
+    return true;
   } catch (err) {
     console.warn(
-      "Redis: initial connect failed — starting without a cache and retrying in the background.",
+      `Redis (${label}): initial connect did not succeed — continuing without a cache ` +
+        `and retrying in the background.`,
       err instanceof Error ? err.message : err,
     );
+    return false;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  return client;
 };
 
 /**
@@ -97,7 +134,14 @@ export const duplicateRedisClient = (label: string): RedisClientType => {
  * Is Redis usable right now? A client that has never been initialised, or whose
  * socket has closed, is not.
  */
-const redisReady = (): boolean => !!client && client.isOpen;
+// `isReady`, NOT `isOpen`. In node-redis, isOpen means "the client has not been
+// explicitly closed" — it is true the moment connect() is called, while the
+// socket may still be reconnecting. Commands issued in that window are QUEUED,
+// not rejected, so with a reconnect-forever strategy they hang indefinitely:
+// `await cache.del(...)` at startup blocked the server from ever reaching
+// listen(). isReady is true only when the connection can actually serve a
+// command.
+const redisReady = (): boolean => !!client && client.isReady;
 
 const noteUnavailable = (op: string, err?: unknown) => {
   if (!warnedUnavailable) {
@@ -297,7 +341,10 @@ export const rateLimiter = {
     const redis = getRedisClient();
     // Fail safe (not fail open): if Redis is down, still enforce a limit
     // using the bounded in-memory counter instead of allowing everything.
-    if (!redis.isOpen) {
+    // isReady, not isOpen — a reconnecting client QUEUES commands rather than
+    // rejecting them, so isOpen would send every request into an indefinite
+    // wait instead of falling back.
+    if (!redis.isReady) {
       return inMemoryIsAllowed(identifier, maxRequests, windowSeconds);
     }
 
