@@ -84,3 +84,31 @@ export const getTrainingGateStatus = async (
     completedRequired,
   };
 };
+
+/**
+ * Are there any mandatory training materials at all?
+ *
+ * A cheap fleet-wide pre-check so callers that filter MANY drivers (dispatch)
+ * can skip the per-driver work entirely on the common path, where no program has
+ * been marked mandatory. Two small indexed reads instead of three per candidate.
+ */
+export const hasMandatoryTraining = async (): Promise<boolean> => {
+  const programs = await TrainingProgram.find({
+    isActive: true,
+    mandatory: true,
+  })
+    .select("materialIds")
+    .lean();
+
+  const requiredIds = new Set<string>();
+  for (const p of programs) {
+    for (const m of p.materialIds || []) requiredIds.add(String(m));
+  }
+  if (requiredIds.size === 0) return false;
+
+  const activeCount = await TrainingMaterial.countDocuments({
+    _id: { $in: [...requiredIds].map((id) => new Types.ObjectId(id)) },
+    isActive: true,
+  });
+  return activeCount > 0;
+};

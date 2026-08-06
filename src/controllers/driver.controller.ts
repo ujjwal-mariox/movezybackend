@@ -384,6 +384,13 @@ export const getProfile = async (
       totalDurationMin: 0,
     };
 
+    // Whether mandatory training is finished. `completedLessons` is on the
+    // driver document already, but "complete" can only be decided against the
+    // mandatory catalogue, so it is resolved here. Without this the profile had
+    // no way to mark Training as done, and the row invited a driver to redo
+    // training they had already finished.
+    const trainingGate = await getTrainingGateStatus(driverId);
+
     req.rData = {
       ...driver,
       stats: {
@@ -392,6 +399,16 @@ export const getProfile = async (
         totalDistance: Math.round(stats.totalDistance * 100) / 100,
         totalDurationMin: stats.totalDurationMin,
       },
+      training: {
+        required: trainingGate.required,
+        complete: trainingGate.complete,
+        totalRequired: trainingGate.totalRequired,
+        completedRequired: trainingGate.completedRequired,
+      },
+      // Already present on the driver document via the spread above, but named
+      // here too so the client has one obvious flag to read rather than having
+      // to know the timestamp field.
+      instructionsAcknowledged: !!(driver as any).instructionsAcknowledgedAt,
     };
     req.msg = "profile_fetched";
     next();

@@ -12,6 +12,10 @@ import { getRedisClient, cache } from "../utils/redis.util";
 import { getIO, emitToUser, emitToBooking } from "../utils/socket.util";
 import * as mqttUtil from "../utils/mqtt.util";
 import * as notificationService from "./notification.service";
+import {
+  getTrainingGateStatus,
+  hasMandatoryTraining,
+} from "./training-gate.service";
 
 // Redis keys
 const BOOKING_DRIVERS_KEY = "booking:drivers:"; // booking:drivers:{bookingId} -> Set of driver IDs
@@ -174,6 +178,14 @@ export const findNearbyDrivers = async (
     // Filter by availability and vehicle type
     const availableDrivers: NearbyDriver[] = [];
 
+    // Mandatory training is enforced when a driver goes ONLINE
+    // (driver.controller.ts toggleOnline), but that check cannot reach a driver
+    // who was already online when an admin marked a program mandatory — they
+    // stay online and keep receiving rides they are not cleared for. Re-checking
+    // at dispatch closes that window. Resolved once here so the common case (no
+    // mandatory program) costs two reads instead of three per candidate.
+    const trainingEnforced = await hasMandatoryTraining();
+
     for (const result of candidates) {
       const driverId = result.driverId;
       const distance = result.distanceKm;
@@ -202,6 +214,12 @@ export const findNearbyDrivers = async (
       });
 
       if (!hasVehicle) continue;
+
+      // Skip a driver whose mandatory training is outstanding.
+      if (trainingEnforced) {
+        const gate = await getTrainingGateStatus(driverId);
+        if (gate.required && !gate.complete) continue;
+      }
 
       // Check if driver doesn't have an active booking
       const hasActiveBooking = await Booking.findOne({
