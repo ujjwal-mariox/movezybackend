@@ -5,6 +5,7 @@ import crypto from "crypto";
 import User from "../models/Users";
 import * as RewardService from "../services/reward.service";
 import RewardTransaction from "../models/reward-transaction.model";
+import { AppConfig } from "../models/app-config.model";
 
 // ─── CONSTANTS ───
 const REFERRAL_CODE_LENGTH = 8;
@@ -219,8 +220,22 @@ export const getReferralStats = async (
       .limit(20)
       .lean();
 
+    // The download link the share message carries. Admin-configured (same
+    // AppConfig pattern as SUPPORT_PHONE) rather than hardcoded, because a
+    // wrong store URL in a shipped APK cannot be fixed without a new release.
+    // Absent config means the message goes out with the code alone — never a
+    // fabricated link that would 404 for every friend who taps it.
+    const linkDoc = await AppConfig.findOne({ key: "APP_DOWNLOAD_URL" }).lean();
+    const downloadUrl = (linkDoc as any)?.value
+      ? String((linkDoc as any).value)
+      : "";
+    const referralLink = downloadUrl
+      ? `${downloadUrl}${downloadUrl.includes("?") ? "&" : "?"}ref=${user!.referralCode}`
+      : "";
+
     req.rData = {
       referralCode: user!.referralCode,
+      referralLink,
       referralCount,
       totalEarnings,
       referrerRewardAmount: REFERRER_REWARD_AMOUNT,

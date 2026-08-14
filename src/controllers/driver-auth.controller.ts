@@ -680,13 +680,26 @@ export const uploadRC = async (
       "2W": "2W", "3W": "3W", "4W": "4W",
     };
     const rawType = req.body.vehicalId || "4W";
+
+    // Distinguish onboarding (first vehicle, driver not yet approved) from an
+    // approved driver adding another vehicle. The added vehicle must go
+    // through its own admin review, so it must not enter dispatch yet.
+    const driverDoc = await DriverService.getDriverById(driverId);
+    const driverAlreadyApproved = driverDoc?.status === "approved";
+    const existingVehicles = await VehicleModel.countDocuments({
+      driverId: new Types.ObjectId(driverId),
+      isDeleted: { $ne: true },
+    });
+
     const vehicleData: any = {
       driverId: new Types.ObjectId(driverId),
       vehicleNumber: req.body.vehicleNumber,
       vehicleType: vehicleTypeMap[rawType] || "4W",
       rcFrontImage: rcFrontUrl,
       rcBackImage: rcBackUrl,
-      isPrimary: true,
+      // Only the first vehicle is primary. Every vehicle used to be created
+      // with isPrimary:true, so the admin panel showed them all as "(Primary)".
+      isPrimary: existingVehicles === 0,
       isActive: true,
     };
     if (req.body.bodyType) vehicleData.vehicleBodyType = req.body.bodyType;
@@ -724,7 +737,14 @@ export const uploadRC = async (
             $set: {
               driverId: new Types.ObjectId(driverId),
               vehicleTypeId: catalogType._id,
-              isActive: true,
+              // During onboarding the driver is not approved, so dispatch
+              // can't pick them regardless and driver-level approval will
+              // activate this row. But when an APPROVED driver adds a vehicle,
+              // an active row here made the unverified vehicle dispatchable
+              // the moment its RC was uploaded — before payment, before any
+              // review. It now stays inactive until the admin approves this
+              // specific vehicle.
+              isActive: !driverAlreadyApproved,
               isDeleted: false,
             },
           },

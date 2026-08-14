@@ -285,6 +285,13 @@ driverRouter.post(
   ResponseMiddleware,
 );
 
+// Apply an admin-created onboarding coupon to a specific vehicle
+driverRouter.post(
+  "/my-vehicles/:vehicleId/apply-coupon",
+  ErrorHandlerMiddleware(DriverController.applyVehicleCoupon),
+  ResponseMiddleware,
+);
+
 // =====================
 // VEHICLES (Legacy)
 // =====================

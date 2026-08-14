@@ -28,6 +28,20 @@ export interface IDriverBankDetails {
   isVerified?: boolean;
 }
 
+// A driver-side edit of an account already on file. It never touches
+// bankDetails directly — an admin approves or rejects it first, because a
+// self-served account swap is exactly how a stolen phone redirects payouts.
+export interface IDriverBankUpdateRequest {
+  accountHolderName: string;
+  bankName?: string;
+  accountNumber: string;
+  ifscCode: string;
+  status: "PENDING" | "APPROVED" | "REJECTED";
+  requestedAt?: Date;
+  decidedAt?: Date;
+  rejectionReason?: string;
+}
+
 export interface IDriver {
   _id?: Types.ObjectId;
 
@@ -61,6 +75,7 @@ export interface IDriver {
 
   // Bank Details
   bankDetails?: IDriverBankDetails;
+  bankDetailsUpdateRequest?: IDriverBankUpdateRequest;
 
   // Addresses
   addresses?: IDriverAddress[];

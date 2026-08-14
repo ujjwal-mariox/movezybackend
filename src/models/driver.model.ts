@@ -129,6 +129,21 @@ const DriverSchema = new Schema<IDriver>(
       isVerified: { type: Boolean, default: false },
     },
 
+    // Pending driver-requested change to bankDetails, held for an admin
+    // decision. Every field is declared because the schema is strict — an
+    // undeclared path would be silently dropped on save and the "pending"
+    // request would vanish without an error.
+    bankDetailsUpdateRequest: {
+      accountHolderName: String,
+      bankName: String,
+      accountNumber: String,
+      ifscCode: String,
+      status: { type: String, enum: ["PENDING", "APPROVED", "REJECTED"] },
+      requestedAt: Date,
+      decidedAt: Date,
+      rejectionReason: String,
+    },
+
     // Addresses
     addresses: [
       {

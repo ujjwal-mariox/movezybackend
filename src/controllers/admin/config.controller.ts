@@ -828,6 +828,11 @@ export const createAppSetting = async (req: Request, res: Response) => {
     description,
   });
 
+  // Readers cache their FALLBACK under config:<key> when the row is absent
+  // (getJoiningFee caches 999), so creating the row must invalidate too or
+  // the old fallback survives for up to an hour.
+  await cache.del(`config:${key}`);
+
   res.locals.data = {
     message: "Setting created",
     setting,

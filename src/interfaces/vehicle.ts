@@ -34,6 +34,8 @@ export interface IVehicle {
   onboardingOrderId?: string;
   referralCodeApplied?: string;
   referralDiscount: number;
+  couponCodeApplied?: string;
+  couponDiscount?: number;
 
   // Verification
   verificationStatus: "pending" | "under_verification" | "approved" | "rejected";

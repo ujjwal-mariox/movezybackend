@@ -52,6 +52,23 @@ const generateTicketId = async (): Promise<string> => {
 /**
  * Create support ticket
  */
+const URGENT_HINTS = ["sos", "emergency", "safety", "accident", "harass", "theft"];
+const HIGH_HINTS = ["payment", "refund", "wallet", "damage", "charge", "overcharg"];
+const BOOKING_HIGH_HINTS = ["driver", "late", "cancel", "delay", "pickup", "delivery"];
+
+const derivePriority = (
+  category: string,
+  hasBooking: boolean,
+): ISupportTicket["priority"] => {
+  const c = (category || "").toLowerCase();
+  if (URGENT_HINTS.some((h) => c.includes(h))) return "URGENT";
+  if (HIGH_HINTS.some((h) => c.includes(h))) return "HIGH";
+  // A trip-related complaint tied to an actual booking is time-sensitive in a
+  // way the same category without a booking is not.
+  if (hasBooking && BOOKING_HIGH_HINTS.some((h) => c.includes(h))) return "HIGH";
+  return "MEDIUM";
+};
+
 export const createTicket = async (data: {
   userId?: Types.ObjectId;
   driverId?: Types.ObjectId;
@@ -68,7 +85,11 @@ export const createTicket = async (data: {
 }) => {
   const ticketId = await generateTicketId();
   const type = data.type || inferTicketType(data);
-  const priority = data.priority || "MEDIUM";
+  // Neither app sends a priority, so every ticket landed at the MEDIUM
+  // default "regardless of urgency". When the caller doesn't specify one,
+  // derive it from what the category says and whether a live booking is
+  // attached. An explicit priority from a client still wins.
+  const priority = data.priority || derivePriority(data.category, !!data.bookingId);
   const slaMinutes = data.slaMinutes ?? PRIORITY_SLA_MINUTES[priority] ?? 240;
   const slaDueAt = new Date(Date.now() + slaMinutes * 60 * 1000);
 

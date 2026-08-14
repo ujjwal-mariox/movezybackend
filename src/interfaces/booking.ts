@@ -114,6 +114,7 @@ export interface IBooking {
   // Coins
   coinsUsed?: number;
   coinDiscount?: number;
+  userDiscount?: number;
   coinsEarned?: number;
 
   /**

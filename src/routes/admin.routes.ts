@@ -4,8 +4,11 @@ import * as BookingController from "../controllers/admin/booking.controller";
 import * as UserController from "../controllers/admin/user.controller";
 import * as DriverController from "../controllers/admin/driver.controller";
 import * as PromoController from "../controllers/admin/promo.controller";
+import * as UserDiscountController from "../controllers/admin/user-discount.controller";
+import * as OnboardingCouponController from "../controllers/admin/onboarding-coupon.controller";
 import * as ConfigController from "../controllers/admin/config.controller";
 import * as ContentController from "../controllers/admin/content.controller";
+import * as FaqController from "../controllers/admin/faq.controller";
 import * as SupportController from "../controllers/admin/support.controller";
 import * as ReportsController from "../controllers/admin/reports.controller";
 import * as ScheduledReportController from "../controllers/admin/scheduled-report.controller";
@@ -381,11 +384,44 @@ adminRouter.put(
   ResponseMiddleware,
 );
 
+// Approve/reject a driver's pending bank-details CHANGE request (drivers can
+// no longer overwrite an account already on file — see the driver-side PUT).
+adminRouter.put(
+  "/drivers/:id/bank-request",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.DRIVERS_UPDATE),
+  ErrorHandlerMiddleware(DriverController.decideBankUpdateRequest),
+  ResponseMiddleware,
+);
+
+// Queue of vehicles awaiting approval (approved drivers' added vehicles
+// included — the driver-level pending count misses those entirely).
+// Registered before /drivers/:id/vehicles so "pending-vehicles" is not
+// captured as an :id.
+adminRouter.get(
+  "/drivers/pending-vehicles",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.DRIVERS_VIEW),
+  ErrorHandlerMiddleware(DriverController.listPendingVehicles),
+  ResponseMiddleware,
+);
+
 adminRouter.get(
   "/drivers/:id/vehicles",
   verifyAdminToken,
   requirePermission(PERMISSIONS.DRIVERS_VIEW),
   ErrorHandlerMiddleware(DriverController.getDriverVehicles),
+  ResponseMiddleware,
+);
+
+// Per-vehicle approval. Driver-level verify blanket-updates all vehicles and
+// is unreachable once the driver is approved, so an added 2nd vehicle had no
+// approval path at all.
+adminRouter.put(
+  "/drivers/:id/vehicles/:vehicleId/verify",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.DRIVERS_VERIFY),
+  ErrorHandlerMiddleware(DriverController.verifyDriverVehicle),
   ResponseMiddleware,
 );
 
@@ -476,7 +512,76 @@ adminRouter.put(
   ResponseMiddleware,
 );
 
+// ============ DRIVER ONBOARDING COUPONS ============
+adminRouter.get(
+  "/onboarding-coupons",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.PROMOS_VIEW),
+  ErrorHandlerMiddleware(OnboardingCouponController.listCoupons),
+  ResponseMiddleware,
+);
+
+adminRouter.post(
+  "/onboarding-coupons",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.PROMOS_CREATE),
+  ErrorHandlerMiddleware(OnboardingCouponController.createCoupon),
+  ResponseMiddleware,
+);
+
+adminRouter.put(
+  "/onboarding-coupons/:id",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.PROMOS_UPDATE),
+  ErrorHandlerMiddleware(OnboardingCouponController.updateCoupon),
+  ResponseMiddleware,
+);
+
+adminRouter.delete(
+  "/onboarding-coupons/:id",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.PROMOS_DELETE),
+  ErrorHandlerMiddleware(OnboardingCouponController.deleteCoupon),
+  ResponseMiddleware,
+);
+
+// ============ CUSTOMER DISCOUNTS (strikethrough pricing) ============
+// Grouped with promos and gated by the same permissions: both are money-off
+// configuration owned by the same admin role.
+adminRouter.get(
+  "/user-discounts",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.PROMOS_VIEW),
+  ErrorHandlerMiddleware(UserDiscountController.listUserDiscounts),
+  ResponseMiddleware,
+);
+
+adminRouter.post(
+  "/user-discounts",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.PROMOS_CREATE),
+  ErrorHandlerMiddleware(UserDiscountController.createUserDiscount),
+  ResponseMiddleware,
+);
+
+adminRouter.put(
+  "/user-discounts/:id",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.PROMOS_UPDATE),
+  ErrorHandlerMiddleware(UserDiscountController.updateUserDiscount),
+  ResponseMiddleware,
+);
+
+adminRouter.delete(
+  "/user-discounts/:id",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.PROMOS_DELETE),
+  ErrorHandlerMiddleware(UserDiscountController.deleteUserDiscount),
+  ResponseMiddleware,
+);
+
 // ============ PROMO CODES ============
+
 adminRouter.get(
   "/promos",
   verifyAdminToken,
@@ -530,6 +635,41 @@ adminRouter.get(
   verifyAdminToken,
   requirePermission(PERMISSIONS.PROMOS_VIEW),
   ErrorHandlerMiddleware(PromoController.getPromoStats),
+  ResponseMiddleware,
+);
+
+// ============ FAQs (Help & Support content) ============
+// Same gate as the other CMS content: FAQs are support copy, and the apps
+// read them cached — the controller invalidates on every write.
+adminRouter.get(
+  "/faqs",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SETTINGS_VIEW),
+  ErrorHandlerMiddleware(FaqController.listFaqs),
+  ResponseMiddleware,
+);
+
+adminRouter.post(
+  "/faqs",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SETTINGS_UPDATE),
+  ErrorHandlerMiddleware(FaqController.createFaq),
+  ResponseMiddleware,
+);
+
+adminRouter.put(
+  "/faqs/:id",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SETTINGS_UPDATE),
+  ErrorHandlerMiddleware(FaqController.updateFaq),
+  ResponseMiddleware,
+);
+
+adminRouter.delete(
+  "/faqs/:id",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SETTINGS_UPDATE),
+  ErrorHandlerMiddleware(FaqController.deleteFaq),
   ResponseMiddleware,
 );
 

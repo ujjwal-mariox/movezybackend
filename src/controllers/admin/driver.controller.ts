@@ -8,6 +8,7 @@ import Booking from "../../models/booking.model";
 import VehicleType from "../../models/vehicle-type.model";
 import { emitToUser } from "../../utils/socket.util";
 import * as notificationService from "../../services/notification.service";
+import { auditFromRequest } from "./audit-log.controller";
 
 /**
  * Normalize a DriverKyc record into the flat `documents[]` array the admin
@@ -954,6 +955,135 @@ export const verifyBankDetails = async (req: Request, res: Response) => {
   };
 };
 
+// Audit rows must not carry a full bank account number — they are readable by
+// every admin with audit access, which is a wider audience than driver PII.
+const maskAccount = (accountNumber?: string) => {
+  const s = String(accountNumber || "");
+  return s.length > 4 ? `••••${s.slice(-4)}` : s;
+};
+
+/**
+ * Decide a driver's pending bank-details change request.
+ * PUT /admin/drivers/:id/bank-request  body { action: "approve"|"reject", reason? }
+ *
+ * Exists because the driver PUT no longer writes bankDetails once an account
+ * is on file — it parks the edit here for a human decision. Approve copies the
+ * requested fields into bankDetails (unverified — the separate
+ * /bank-details/verify step still owns that flag); reject only stamps the
+ * request, with a mandatory reason the driver will be shown.
+ */
+export const decideBankUpdateRequest = async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { action, reason } = req.body as {
+    action?: "approve" | "reject";
+    reason?: string;
+  };
+
+  if (action !== "approve" && action !== "reject") {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid action. Use 'approve' or 'reject'",
+    });
+  }
+
+  if (action === "reject" && !String(reason || "").trim()) {
+    return res.status(400).json({
+      success: false,
+      message: "A reason is required to reject a bank update request",
+    });
+  }
+
+  const driver = await Driver.findById(id);
+  if (!driver) {
+    return res.status(404).json({ success: false, message: "Driver not found" });
+  }
+
+  const request = driver.bankDetailsUpdateRequest;
+  if (!request || request.status !== "PENDING") {
+    return res.status(400).json({
+      success: false,
+      message: "This driver has no pending bank update request",
+    });
+  }
+
+  const previousAccount = maskAccount(driver.bankDetails?.accountNumber);
+  const requestedAccount = maskAccount(request.accountNumber);
+  const decidedAt = new Date();
+
+  if (action === "approve") {
+    driver.bankDetails = {
+      accountHolderName: request.accountHolderName,
+      bankName: request.bankName || "",
+      accountNumber: request.accountNumber,
+      ifscCode: request.ifscCode,
+      // A changed account must be re-verified; approval only says the CHANGE
+      // was sanctioned, not that the account was checked against a passbook.
+      isVerified: false,
+    };
+    request.status = "APPROVED";
+    request.rejectionReason = undefined;
+  } else {
+    request.status = "REJECTED";
+    request.rejectionReason = String(reason).trim();
+  }
+  request.decidedAt = decidedAt;
+  // bankDetailsUpdateRequest is a nested path, not a subdocument schema —
+  // mutating its keys in place is not always picked up by change tracking.
+  driver.markModified("bankDetailsUpdateRequest");
+  await driver.save();
+
+  await auditFromRequest(req, {
+    action: action === "approve" ? "APPROVE" : "REJECT",
+    module: "drivers",
+    targetId: String(driver._id),
+    targetType: "Driver",
+    description:
+      action === "approve"
+        ? `Approved bank details change for ${driver.fullName || driver._id} (${previousAccount || "none"} → ${requestedAccount})`
+        : `Rejected bank details change for ${driver.fullName || driver._id} (requested ${requestedAccount}) — ${request.rejectionReason}`,
+    metadata: {
+      requestedAt: request.requestedAt,
+      ifscCode: request.ifscCode,
+      accountNumberMasked: requestedAccount,
+    },
+  });
+
+  // Same propagation pair the verify/block decisions use: a socket event for a
+  // live app, an inbox row (+push when FCM is up) for one that isn't.
+  try {
+    emitToUser(String(driver._id), "driver:bank-request", {
+      status: request.status,
+      rejectionReason: request.rejectionReason ?? null,
+      decidedAt: decidedAt.toISOString(),
+    });
+
+    await notificationService
+      .sendToDriver(
+        driver._id as Types.ObjectId,
+        "SYSTEM",
+        action === "approve"
+          ? "Bank Details Updated"
+          : "Bank Update Request Rejected",
+        action === "approve"
+          ? `Your bank account change was approved. Payouts will now use the account ending ${requestedAccount.slice(-4)}.`
+          : `Your bank account change was rejected: ${request.rejectionReason}`,
+        {
+          status: request.status,
+          reason: request.rejectionReason ?? "",
+        },
+      )
+      .catch(() => null);
+  } catch (err) {
+    console.error("Bank request decision: propagation error", err);
+  }
+
+  res.locals.data = {
+    message: `Bank update request ${action === "approve" ? "approved" : "rejected"}`,
+    bankDetails: driver.bankDetails,
+    updateRequest: driver.bankDetailsUpdateRequest,
+  };
+};
+
 /**
  * Get driver vehicles
  */
@@ -1152,4 +1282,126 @@ export const getDriverEarnings = async (req: Request, res: Response) => {
     },
     dailyEarnings,
   };
+};
+
+/**
+ * PUT /admin/drivers/:id/vehicles/:vehicleId/verify — approve or reject ONE
+ * vehicle.
+ *
+ * Driver-level verification blanket-updates every vehicle, and its button
+ * disappears once the driver is approved — so a 2nd vehicle sat at "pending"
+ * forever with no reachable approval path. This is that path. Approval also
+ * activates the vehicle's dispatch row (the same catalog-type bridging
+ * verifyDriver does); rejection deactivates it, taking the vehicle out of
+ * dispatch.
+ */
+export const verifyDriverVehicle = async (req: Request, res: Response) => {
+  const { id, vehicleId } = req.params;
+  const { action, rejectionReason } = req.body;
+
+  if (action !== "approve" && action !== "reject") {
+    return res.status(400).json({
+      success: false,
+      message: "action must be 'approve' or 'reject'",
+    });
+  }
+  if (action === "reject" && !rejectionReason) {
+    return res.status(400).json({
+      success: false,
+      message: "rejectionReason is required when rejecting",
+    });
+  }
+
+  const vehicle = await Vehicle.findOne({
+    _id: vehicleId,
+    driverId: id,
+    isDeleted: { $ne: true },
+  });
+  if (!vehicle) {
+    return res
+      .status(404)
+      .json({ success: false, message: "Vehicle not found for this driver" });
+  }
+
+  vehicle.verificationStatus = action === "approve" ? "approved" : "rejected";
+  (vehicle as any).rejectionReason =
+    action === "reject" ? String(rejectionReason) : undefined;
+  await vehicle.save();
+
+  // Sync the dispatch row for THIS vehicle only — same fallback as the
+  // driver-level bridge: rows predating vehicleTypeId only know a category,
+  // so use that category's designated default rather than stranding the
+  // vehicle un-dispatchable.
+  if (vehicle.vehicleNumber) {
+    let typeId: any = (vehicle as any).vehicleTypeId;
+    if (!typeId && (vehicle as any).vehicleType) {
+      const fallback = await VehicleType.findOne({
+        categoryCode: (vehicle as any).vehicleType,
+        isDefaultForCategory: true,
+        isActive: true,
+      }).select("_id");
+      typeId = fallback?._id;
+    }
+    if (typeId) {
+      await DriverVehicle.findOneAndUpdate(
+        { registrationNumber: String(vehicle.vehicleNumber).toUpperCase() },
+        {
+          $set: {
+            driverId: vehicle.driverId,
+            vehicleTypeId: typeId,
+            isActive: action === "approve",
+            isDeleted: false,
+          },
+        },
+        { upsert: true, new: true },
+      );
+    } else if (action === "approve") {
+      console.warn(
+        `[vehicle-verify] ${vehicle.vehicleNumber} approved but has no catalog type and no category default — it will NOT be dispatchable`,
+      );
+    }
+  }
+
+  // Tell the driver — same channel as driver-level verification.
+  try {
+    await notificationService.sendToDriver(
+      vehicle.driverId as any,
+      "SYSTEM",
+      action === "approve" ? "Vehicle approved" : "Vehicle rejected",
+      action === "approve"
+        ? `Your vehicle ${vehicle.vehicleNumber} has been approved and can now receive bookings.`
+        : `Your vehicle ${vehicle.vehicleNumber} was rejected: ${rejectionReason}`,
+      { type: "VEHICLE_VERIFICATION", vehicleId: String(vehicle._id) },
+    );
+  } catch (e) {
+    console.error("vehicle verification notification failed", e);
+  }
+
+  await auditFromRequest(req, {
+    action: "CONFIG_CHANGE",
+    module: "drivers",
+    description: `${action === "approve" ? "Approved" : "Rejected"} vehicle ${vehicle.vehicleNumber} for driver ${id}`,
+    targetType: "Vehicle",
+    targetId: String(vehicle._id),
+  });
+
+  res.locals.data = { vehicle };
+};
+
+/**
+ * GET /admin/drivers/pending-vehicles — every vehicle awaiting approval, with
+ * its driver. The driver-level pending queue counts Driver.status only, so an
+ * APPROVED driver's newly added vehicle appeared in no list at all — an admin
+ * had to stumble into that driver's drawer to notice it.
+ */
+export const listPendingVehicles = async (_req: Request, res: Response) => {
+  const vehicles = await Vehicle.find({
+    isDeleted: { $ne: true },
+    verificationStatus: { $in: ["pending", "under_verification"] },
+  })
+    .sort({ createdAt: -1 })
+    .populate("driverId", "fullName mobileNumber status")
+    .lean();
+
+  res.locals.data = { vehicles, total: vehicles.length };
 };

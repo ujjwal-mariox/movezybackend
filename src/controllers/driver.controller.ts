@@ -25,6 +25,7 @@ import { getTrainingGateStatus } from "../services/training-gate.service";
 import VehicleTypeModel from "../models/vehicle-type.model";
 import DriverKycModel from "../models/driver-kyc.model";
 import VehicleModel from "../models/vehicle.model";
+import OnboardingCoupon from "../models/onboarding-coupon.model";
 import * as PaymentService from "../services/payment.service";
 import { Notification } from "../models/notification.model";
 import * as IncentiveService from "../services/incentive.service";
@@ -40,6 +41,38 @@ const DEFAULT_JOINING_FEE = 999;
  * Get the joining fee amount from AppConfig (cached).
  * Falls back to 999 if not configured.
  */
+/**
+ * Record onboarding-coupon redemptions for the given vehicles' driver. Called
+ * at payment completion / waiver — never at apply — so abandoned checkouts do
+ * not burn uses. Per-driver dedupe via $addToSet + the usedByDrivers check at
+ * apply time.
+ */
+const recordCouponUsage = async (
+  vehicles: Array<{ couponCodeApplied?: string | null }>,
+  driverId: string,
+): Promise<void> => {
+  const codes = [
+    ...new Set(
+      vehicles
+        .map((v) => (v as any).couponCodeApplied)
+        .filter((c: any): c is string => !!c),
+    ),
+  ];
+  for (const code of codes) {
+    try {
+      await OnboardingCoupon.updateOne(
+        { code, usedByDrivers: { $ne: new Types.ObjectId(driverId) } },
+        {
+          $inc: { usedCount: 1 },
+          $addToSet: { usedByDrivers: new Types.ObjectId(driverId) },
+        },
+      );
+    } catch (e) {
+      console.error(`failed to record coupon usage for ${code}`, e);
+    }
+  }
+};
+
 const getJoiningFee = async (): Promise<number> => {
   const cached = await cache.get<number>("config:joining_fee");
   if (cached !== null && cached !== undefined) return cached;
@@ -77,6 +110,16 @@ export const getDashboard = async (
     todayStart.setHours(0, 0, 0, 0);
 
     const monthlyStart = new Date(now.getFullYear(), now.getMonth() - 7, 1);
+
+    // Monday 00:00 (server-local), the same week the incentive service counts
+    // with — a Sunday-based week here would disagree with the weekly trip
+    // count the app shows right next to these figures.
+    const weekStart = new Date(todayStart);
+    weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    // The week can start in the previous month (and vice versa), so the
+    // period aggregation below pre-filters from whichever boundary is older.
+    const periodEarliest = weekStart < monthStart ? weekStart : monthStart;
 
     // Get driver's active vehicle to filter pending bookings
     const activeVehicle = await DriverVehicleModel.findOne({
@@ -124,6 +167,7 @@ export const getDashboard = async (
       pendingBookings,
       completedBookings,
       monthlyRevenue,
+      periodStats,
     ] = await Promise.all([
       DriverModel.findById(driverId)
         .select(
@@ -228,6 +272,59 @@ export const getDashboard = async (
         },
         { $sort: { "_id.year": 1, "_id.month": 1 } },
       ]),
+      // This-week / this-month figures for the Earnings screen, which had to
+      // draw em dashes because nothing served them. driverEarnings only — the
+      // net frozen at completion — never finalFare (the customer's gross).
+      BookingModel.aggregate([
+        {
+          $match: {
+            driverId: driverObjectId,
+            status: "COMPLETED",
+          },
+        },
+        {
+          // completedAt was not stamped on rows completed before the field
+          // existed; for those old rows updatedAt (their final transition) is
+          // the closest honest stand-in, so they still count toward a period.
+          $addFields: {
+            effectiveCompletedAt: { $ifNull: ["$completedAt", "$updatedAt"] },
+          },
+        },
+        { $match: { effectiveCompletedAt: { $gte: periodEarliest } } },
+        {
+          $group: {
+            _id: null,
+            weekEarnings: {
+              $sum: {
+                $cond: [
+                  { $gte: ["$effectiveCompletedAt", weekStart] },
+                  { $ifNull: ["$driverEarnings", 0] },
+                  0,
+                ],
+              },
+            },
+            weekTrips: {
+              $sum: {
+                $cond: [{ $gte: ["$effectiveCompletedAt", weekStart] }, 1, 0],
+              },
+            },
+            monthEarnings: {
+              $sum: {
+                $cond: [
+                  { $gte: ["$effectiveCompletedAt", monthStart] },
+                  { $ifNull: ["$driverEarnings", 0] },
+                  0,
+                ],
+              },
+            },
+            monthTrips: {
+              $sum: {
+                $cond: [{ $gte: ["$effectiveCompletedAt", monthStart] }, 1, 0],
+              },
+            },
+          },
+        },
+      ]),
     ]);
 
     if (!driver) {
@@ -257,6 +354,12 @@ export const getDashboard = async (
 
     const lifetime = lifetimeStats[0] || { totalEarnings: 0, totalServices: 0 };
     const today = todayStats[0] || { todaysEarnings: 0, todaysServices: 0 };
+    const period = periodStats[0] || {
+      weekEarnings: 0,
+      weekTrips: 0,
+      monthEarnings: 0,
+      monthTrips: 0,
+    };
     const monthlyRevenueMap = new Map(
       monthlyRevenue.map((entry: any) => [
         `${entry._id.year}-${entry._id.month}`,
@@ -312,6 +415,12 @@ export const getDashboard = async (
         upcomingServices: Number(upcomingCount || 0),
         todaysServices: Number(today.todaysServices || 0),
         todaysEarnings: Number(today.todaysEarnings || 0),
+        // Since Monday 00:00 / since the 1st. Real aggregates, not the
+        // monthlyRevenue trend re-labelled — that carries amounts only.
+        weekEarnings: Number(period.weekEarnings || 0),
+        weekTrips: Number(period.weekTrips || 0),
+        monthEarnings: Number(period.monthEarnings || 0),
+        monthTrips: Number(period.monthTrips || 0),
         onGoingCount: Number(onGoingCount || 0),
         pendingCount: Number(pendingCount || 0),
         completedCount: Number(completedCount || 0),
@@ -490,10 +599,17 @@ export const getBankDetails = async (
     const driverId = (req as any).driverId;
 
     const driver = await DriverModel.findById(driverId)
-      .select("bankDetails")
+      .select("bankDetails bankDetailsUpdateRequest")
       .lean();
 
-    req.rData = driver?.bankDetails || null;
+    // Nested rather than flat: the app reads `data['bankDetails'] ?? data`, so
+    // old builds keep working, and `updateRequest` rides along so the form can
+    // render the PENDING/REJECTED state of a change the driver already asked
+    // for (it used to have no way of knowing one existed).
+    req.rData = {
+      bankDetails: driver?.bankDetails || null,
+      updateRequest: driver?.bankDetailsUpdateRequest || null,
+    };
     req.msg = "bank_details_fetched";
     next();
   } catch (error) {
@@ -510,22 +626,54 @@ export const updateBankDetails = async (
     const driverId = (req as any).driverId;
     const { accountHolderName, bankName, accountNumber, ifscCode } = req.body;
 
-    const driver = await DriverModel.findByIdAndUpdate(
-      driverId,
-      {
-        bankDetails: {
-          accountHolderName,
-          bankName,
-          accountNumber,
-          ifscCode,
-          isVerified: false,
-        },
-      },
-      { new: true },
+    const driver = await DriverModel.findById(driverId).select(
+      "bankDetails bankDetailsUpdateRequest",
     );
+    if (!driver) {
+      req.rCode = 5;
+      req.msg = "driver_not_found";
+      return next();
+    }
 
-    req.rData = driver?.bankDetails;
-    req.msg = "bank_details_updated";
+    // First-ever submission (onboarding) still writes directly — there is no
+    // account on file to protect yet, and onboarding must not stall behind an
+    // admin queue.
+    if (!driver.bankDetails?.accountNumber) {
+      driver.bankDetails = {
+        accountHolderName,
+        bankName,
+        accountNumber,
+        ifscCode,
+        isVerified: false,
+      };
+      await driver.save();
+
+      req.rData = { bankDetails: driver.bankDetails, updateRequest: null };
+      req.msg = "bank_details_updated";
+      return next();
+    }
+
+    // An account is already on file, so this PUT must NOT touch bankDetails:
+    // a self-served swap is how a stolen phone redirects payouts. It becomes a
+    // PENDING request an admin approves or rejects. A re-submission overwrites
+    // any previous request — only the latest ask is actionable.
+    driver.bankDetailsUpdateRequest = {
+      accountHolderName,
+      bankName,
+      accountNumber,
+      ifscCode,
+      status: "PENDING",
+      requestedAt: new Date(),
+      decidedAt: undefined,
+      rejectionReason: undefined,
+    };
+    await driver.save();
+
+    req.rData = {
+      bankDetails: driver.bankDetails,
+      updateRequest: driver.bankDetailsUpdateRequest,
+    };
+    req.msg = "bank_update_requested";
     next();
   } catch (error) {
     next(error);
@@ -2066,6 +2214,94 @@ export const addMyVehicle = async (
   }
 };
 
+/**
+ * POST /driver/app/my-vehicles/:vehicleId/apply-coupon
+ * Apply an admin-created onboarding coupon to one vehicle. Stacks with the
+ * peer referral discount, capped at the joining fee. Usage is NOT recorded
+ * here — only at successful payment or waiver — so abandoning checkout never
+ * burns a use.
+ */
+export const applyVehicleCoupon = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  try {
+    const driverId = (req as any).driverId;
+    const { vehicleId } = req.params;
+    const code = String(req.body.couponCode || req.body.code || "")
+      .trim()
+      .toUpperCase();
+
+    if (!code) {
+      req.rCode = 0;
+      req.msg = "coupon_code_required";
+      return next();
+    }
+
+    const vehicle = await VehicleModel.findOne({
+      _id: vehicleId,
+      driverId: new Types.ObjectId(driverId),
+      isDeleted: { $ne: true },
+    });
+    if (!vehicle) {
+      req.rCode = 0;
+      req.msg = "vehicle_not_found";
+      return next();
+    }
+    if (vehicle.onboardingFeePaid) {
+      req.rCode = 0;
+      req.msg = "already_paid";
+      return next();
+    }
+
+    const now = new Date();
+    const coupon = await OnboardingCoupon.findOne({ code, isActive: true });
+    if (!coupon || coupon.validFrom > now || coupon.validTo < now) {
+      req.rCode = 0;
+      req.msg = "invalid_or_expired_coupon";
+      return next();
+    }
+    if (coupon.maxUses !== -1 && coupon.usedCount >= coupon.maxUses) {
+      req.rCode = 0;
+      req.msg = "coupon_fully_used";
+      return next();
+    }
+    if (
+      coupon.usedByDrivers.some((d) => String(d) === String(driverId))
+    ) {
+      req.rCode = 0;
+      req.msg = "coupon_already_used";
+      return next();
+    }
+
+    const joiningFee = await getJoiningFee();
+    const discount =
+      coupon.discountType === "PERCENT"
+        ? Math.floor((joiningFee * Math.min(coupon.value, 100)) / 100)
+        : Math.min(Math.floor(coupon.value), joiningFee);
+
+    vehicle.couponCodeApplied = coupon.code;
+    vehicle.couponDiscount = discount;
+    await vehicle.save();
+
+    const totalDiscount = Math.min(
+      joiningFee,
+      (vehicle.referralDiscount || 0) + discount,
+    );
+
+    req.rData = {
+      discount,
+      totalDiscount,
+      finalAmount: Math.max(0, joiningFee - totalDiscount),
+    };
+    req.msg = "coupon_applied";
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
 export const applyVehicleReferral = async (
   req: Request,
   res: Response,
@@ -3088,13 +3324,20 @@ export const getOnboardingFee = async (
 
     const joiningFee = await getJoiningFee();
 
-    const vehicleFees = unpaidVehicles.map((v) => ({
-      vehicleId: v._id,
-      vehicleNumber: v.vehicleNumber,
-      baseAmount: joiningFee,
-      discount: v.referralDiscount || 0,
-      finalAmount: Math.max(0, joiningFee - (v.referralDiscount || 0)),
-    }));
+    const vehicleFees = unpaidVehicles.map((v) => {
+      const discount = Math.min(
+        joiningFee,
+        (v.referralDiscount || 0) + ((v as any).couponDiscount || 0),
+      );
+      return {
+        vehicleId: v._id,
+        vehicleNumber: v.vehicleNumber,
+        baseAmount: joiningFee,
+        discount,
+        couponCode: (v as any).couponCodeApplied || null,
+        finalAmount: Math.max(0, joiningFee - discount),
+      };
+    });
 
     const totalAmount = vehicleFees.reduce((sum, v) => sum + v.finalAmount, 0);
 
@@ -3157,9 +3400,51 @@ export const payOnboardingFee = async (
     const joiningFee = await getJoiningFee();
     const amount = unpaid.reduce(
       (sum, v) =>
-        sum + Math.max(0, joiningFee - (v.referralDiscount || 0)),
+        sum +
+        Math.max(
+          0,
+          joiningFee -
+            Math.min(
+              joiningFee,
+              (v.referralDiscount || 0) + ((v as any).couponDiscount || 0),
+            ),
+        ),
       0,
     );
+
+    // Full waiver (e.g. a 100% coupon): Razorpay rejects zero-amount orders,
+    // and there is nothing to collect — mark the vehicles paid directly, with
+    // the same post-payment transitions verifyOnboardingPayment performs.
+    if (amount === 0) {
+      await VehicleModel.updateMany(
+        { _id: { $in: unpaid.map((v) => v._id) } },
+        {
+          onboardingFeePaid: true,
+          onboardingPaymentId: "COUPON_WAIVED",
+          verificationStatus: "under_verification",
+        },
+      );
+
+      const driverDocW = await DriverModel.findById(driverId).select("status");
+      const alreadyOnboardedW = ["active", "approved"].includes(
+        driverDocW?.status ?? "",
+      );
+      await DriverModel.findByIdAndUpdate(driverId, {
+        onboardingFeePaid: true,
+        ...(alreadyOnboardedW ? {} : { status: "under_verification" }),
+      });
+
+      await recordCouponUsage(unpaid, driverId);
+
+      req.rData = {
+        waived: true,
+        amount: 0,
+        vehicleIds: unpaid.map((v) => v._id.toString()),
+        status: alreadyOnboardedW ? driverDocW?.status : "under_verification",
+      };
+      req.msg = "fee_waived";
+      return next();
+    }
 
     const order = await PaymentService.createOrder(
       amount,
@@ -3272,6 +3557,15 @@ export const verifyOnboardingPayment = async (
         verificationStatus: "under_verification",
       },
     );
+
+    // Redeem any coupons the paid vehicles carried (recorded here, not at
+    // apply, so an abandoned checkout never burns a use).
+    const paidVehicles = await VehicleModel.find({
+      _id: { $in: targetIds.map((v) => new Types.ObjectId(v)) },
+    })
+      .select("couponCodeApplied")
+      .lean();
+    await recordCouponUsage(paidVehicles as any[], driverId);
 
     // Also update driver-level flag. An already-onboarded driver adding another
     // vehicle must KEEP their active status: the new vehicle's own

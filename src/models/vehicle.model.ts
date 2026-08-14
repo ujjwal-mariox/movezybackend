@@ -59,6 +59,14 @@ const VehicleSchema = new Schema<IVehicle>(
       type: Number,
       default: 0,
     },
+    // Admin-created onboarding coupon (OnboardingCoupon), separate from the
+    // peer referral above. Both stack, capped at the fee. Declared because
+    // strict mode silently drops undeclared writes.
+    couponCodeApplied: String,
+    couponDiscount: {
+      type: Number,
+      default: 0,
+    },
 
     // Verification
     verificationStatus: {

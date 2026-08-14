@@ -20,6 +20,7 @@ import * as BookingDispatchService from "../services/booking-dispatch.service";
 import * as PaymentService from "../services/payment.service";
 import * as NotificationService from "../services/notification.service";
 import * as EnterpriseService from "../services/enterprise.service";
+import * as UserDiscountService from "../services/user-discount.service";
 import { emitToUser } from "../utils/socket.util";
 import UserGST from "../models/user-gst.model";
 import { cache } from "../utils/redis.util";
@@ -219,6 +220,19 @@ export const getFareEstimate = async (req: Request, res: Response) => {
       finalAmount -= coinDiscount;
     }
 
+    // Automatic admin-managed discount — same order and basis as
+    // createBooking (after promo and coins, on the remaining payable), so the
+    // estimate a customer sees is the amount the booking will charge.
+    let userDiscount = 0;
+    const autoDiscount = await UserDiscountService.discountAmountFor(
+      (req as any).user._id,
+      Math.max(finalAmount, 0),
+    );
+    if (autoDiscount) {
+      userDiscount = autoDiscount.amount;
+      finalAmount -= userDiscount;
+    }
+
     res.json({
       success: true,
       data: {
@@ -226,6 +240,7 @@ export const getFareEstimate = async (req: Request, res: Response) => {
         distanceKm,
         durationMin,
         promoDiscount,
+        userDiscount,
         coinDiscount,
         finalAmount: Math.max(finalAmount, 0),
         // What this trip will actually earn in coins, from the same service
@@ -491,7 +506,21 @@ export const createBooking = async (req: Request, res: Response) => {
     // (driver.controller completeTrip), so commission and driverEarnings were
     // short by 20%/80% of every stop charge and every minimum-fare top-up.
     const subtotalAmount = fareBreakdown.subtotal;
-    const totalDiscount = promoDiscount + coinDiscount;
+    // Automatic admin-managed discount, applied AFTER promo/coins on the
+    // remaining payable. Same settlement rules as a promo: reduces the
+    // customer's finalFare via totalDiscount, never subtotal, so driver
+    // earnings are untouched.
+    let userDiscount = 0;
+    const autoDiscount = await UserDiscountService.discountAmountFor(
+      userId,
+      Math.max(totalAmount, 0),
+    );
+    if (autoDiscount) {
+      userDiscount = autoDiscount.amount;
+      totalAmount -= userDiscount;
+    }
+
+    const totalDiscount = promoDiscount + coinDiscount + userDiscount;
     const finalFare = Math.max(totalAmount, 0);
 
     // Create booking — field names MUST match the Mongoose schema
@@ -559,6 +588,7 @@ export const createBooking = async (req: Request, res: Response) => {
       promoDiscount,
       coinsUsed,
       coinDiscount,
+      userDiscount,
       gstAmount: fareBreakdown.gstAmount || 0,
       gstPercentage: fareBreakdown.gstPercentage || 5,
       gstin: userGstin,
@@ -1845,9 +1875,37 @@ export const getVehicleOptions = async (req: Request, res: Response) => {
       options[0].isRecommended = true;
     }
 
+    // Admin-managed automatic discount (strikethrough pricing). Attached per
+    // option so the app can show original vs discounted; `fare` stays the
+    // UNDISCOUNTED figure, so an older build shows the higher price and the
+    // final bill (which applies the same discount in createBooking) can only
+    // come in lower — never the other way round.
+    const userDiscount = await UserDiscountService.discountAmountFor(
+      (req as any).userId ?? null,
+      1, // probe: fetch the campaign once; per-fare amounts computed below
+    );
+    const withPricing = await Promise.all(
+      options.map(async (o: any) => {
+        if (!userDiscount) return o;
+        const applied = await UserDiscountService.discountAmountFor(
+          (req as any).userId ?? null,
+          o.fare,
+        );
+        if (!applied) return o;
+        return {
+          ...o,
+          discountPercent: applied.percent,
+          discountedFare: Math.max(
+            0,
+            Math.round((o.fare - applied.amount) * 100) / 100,
+          ),
+        };
+      }),
+    );
+
     res.json({
       success: true,
-      data: options,
+      data: withPricing,
     });
   } catch (error: any) {
     res.status(500).json({

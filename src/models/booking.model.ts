@@ -131,6 +131,10 @@ const BookingSchema = new Schema<IBooking>(
     // Coins
     coinsUsed: { type: Number, default: 0 },
     coinDiscount: { type: Number, default: 0 },
+    // Automatic admin-managed discount (UserDiscount campaigns) — the third
+    // component of totalDiscount alongside promo and coins. Declared because
+    // strict mode silently drops undeclared writes.
+    userDiscount: { type: Number, default: 0 },
     coinsEarned: { type: Number, default: 0 },
 
     // Driver settlement, frozen at completion. Payouts sum `driverEarnings`
