@@ -263,6 +263,42 @@ const executeAction = async (rule: IAutomationRule, hit: TriggerHit) => {
         await audit();
         break;
 
+      case "assign_training": {
+        // Trigger-based training: enroll the driver in the program named by
+        // the rule (params.programId). Pairs with the low_rating_consecutive
+        // and cancellation_rate triggers — "rating dropped → retraining" as
+        // real enrollment the driver app already surfaces, not a note.
+        // Upsert so a re-fire never duplicates; a completed enrollment is
+        // reset to re-take (that IS the retraining).
+        const programId = rule.action.params?.programId;
+        if (!programId) {
+          console.warn(
+            `[automation] rule "${rule.name}": assign_training without params.programId — skipped`,
+          );
+          break;
+        }
+        const TrainingEnrollment = (
+          await import("../models/training-enrollment.model")
+        ).default;
+        await TrainingEnrollment.findOneAndUpdate(
+          { programId, driverId: hit.targetId },
+          {
+            $setOnInsert: { enrolledAt: new Date() },
+            $set: { status: "IN_PROGRESS", progress: 0, completedMaterialIds: [] },
+          },
+          { upsert: true },
+        );
+        await NotificationService.sendToDriver(
+          hit.targetId,
+          "SYSTEM",
+          "New training assigned",
+          rule.action.params?.message ||
+            `A training was assigned to you based on recent activity (${rule.name}). Open Training to start.`,
+        );
+        await audit();
+        break;
+      }
+
       case "escalate_to_admin":
         // Recorded to the audit log as a HIGH-impact escalation.
         await createAuditEntry({

@@ -77,6 +77,7 @@ const AutomationRuleSchema = new Schema<IAutomationRule>(
           "escalate_to_admin",
           "create_ticket",
           "block_user",
+          "assign_training",
           "custom",
         ],
       },
