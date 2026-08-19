@@ -50,6 +50,7 @@ const AutomationRuleSchema = new Schema<IAutomationRule>(
           "order_spike",
           "sos_spike",
           "revenue_drop",
+          "document_expiry",
           "custom",
         ],
       },

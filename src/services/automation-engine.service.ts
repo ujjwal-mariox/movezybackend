@@ -32,6 +32,7 @@ const IMPLEMENTED_TRIGGERS = new Set([
   "cancellation_rate",
   "low_rating_consecutive",
   "driver_idle",
+  "document_expiry",
 ]);
 
 const DESTRUCTIVE_ACTIONS = new Set(["suspend_driver", "block_user"]);
@@ -75,6 +76,38 @@ const evaluateTrigger = async (
   const since = new Date(
     Date.now() - (timeWindowDays || 7) * 24 * 60 * 60 * 1000,
   );
+
+  if (type === "document_expiry") {
+    // Days until the driver's LICENCE expires — the one KYC document that
+    // carries an expiry date (drivingLicense.expiryDate; aadhaar/pan/rc have
+    // none). value = days remaining; negative = expired that many days ago.
+    // "Notify 3 days before" is therefore (lte, 3); "block if expired > 2
+    // days" is (lte, -2). Unparseable/absent dates are skipped — a driver
+    // with no recorded date must not be auto-flagged by a date nobody entered.
+    const DriverKYC = (await import("../models/driver-kyc.model")).default;
+    const kycRows = await DriverKYC.find({
+      "drivingLicense.expiryDate": { $exists: true, $nin: [null, ""] },
+    })
+      .select("driverId drivingLicense.expiryDate")
+      .lean();
+
+    const nowMs = Date.now();
+    const hits: TriggerHit[] = [];
+    for (const row of kycRows as any[]) {
+      const raw = row.drivingLicense?.expiryDate;
+      const parsed = raw ? new Date(raw) : null;
+      if (!parsed || isNaN(parsed.getTime())) continue;
+      const daysLeft = Math.floor(
+        (parsed.getTime() - nowMs) / (24 * 60 * 60 * 1000),
+      );
+      hits.push({
+        targetId: row.driverId as Types.ObjectId,
+        targetType: "Driver" as const,
+        value: daysLeft,
+      });
+    }
+    return hits.filter((h) => compare(h.value, operator, threshold));
+  }
 
   if (type === "cancellation_rate") {
     // Per driver: cancelled-by-driver / total assigned, within the window.

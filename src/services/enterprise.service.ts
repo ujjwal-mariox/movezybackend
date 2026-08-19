@@ -749,8 +749,44 @@ export const getAllEnterprises = async (
     Enterprise.countDocuments(query),
   ]);
 
+  // Per-enterprise order count and completed revenue, one aggregation for the
+  // page. The spec's table wants Orders and Revenue columns and the strip
+  // wants a revenue-contribution figure; nothing returned them before.
+  const ids = enterprises.map((e) => e._id);
+  const orderAgg = ids.length
+    ? await Booking.aggregate([
+        { $match: { enterpriseId: { $in: ids } } },
+        {
+          $group: {
+            _id: "$enterpriseId",
+            orderCount: { $sum: 1 },
+            completedRevenue: {
+              $sum: {
+                $cond: [
+                  { $eq: ["$status", "COMPLETED"] },
+                  { $ifNull: ["$finalFare", 0] },
+                  0,
+                ],
+              },
+            },
+          },
+        },
+      ])
+    : [];
+  const orderByEnterprise = new Map<string, any>(
+    orderAgg.map((o: any) => [String(o._id), o]),
+  );
+  const enterprisesWithStats = enterprises.map((e) => {
+    const o = orderByEnterprise.get(String(e._id));
+    return {
+      ...e.toObject(),
+      orderCount: o?.orderCount ?? 0,
+      completedRevenue: o?.completedRevenue ?? 0,
+    };
+  });
+
   return {
-    enterprises,
+    enterprises: enterprisesWithStats,
     pagination: {
       page,
       limit,
