@@ -35,6 +35,13 @@ const VehicleTypeSchema = new Schema<IVehicleType>(
     image: { type: String },
     icon: { type: String },
     sortOrder: { type: Number, default: 0 },
+    // ETA factor for DISPLAY only. Billing time deliberately stays on the
+    // 25 km/h city model (routing.service CITY_SPEED_KMPH) — this scales the
+    // per-vehicle ETA a customer sees (a bike beats a truck), never the fare.
+    avgSpeedKmph: { type: Number, default: 25, min: 5, max: 80 },
+    // What this vehicle is fit to carry. Informational for dispatch/admin —
+    // declared here so strict mode doesn't drop it.
+    loadTypes: [{ type: String, enum: ["FRAGILE", "HEAVY", "LIQUID"] }],
     showOnHomeScreen: { type: Boolean, default: true },
     isActive: { type: Boolean, default: true, index: true },
     isDeleted: { type: Boolean, default: false, index: true },

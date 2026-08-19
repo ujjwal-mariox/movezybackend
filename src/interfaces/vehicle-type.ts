@@ -47,6 +47,9 @@ export interface IVehicleType {
   image?: string;
   icon?: string;
   sortOrder?: number;
+  /// Display-ETA speed; billing time stays on the 25 km/h city model.
+  avgSpeedKmph?: number;
+  loadTypes?: ("FRAGILE" | "HEAVY" | "LIQUID")[];
   showOnHomeScreen: boolean;
   isActive: boolean;
   isDeleted: boolean;

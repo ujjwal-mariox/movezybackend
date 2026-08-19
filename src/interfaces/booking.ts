@@ -81,6 +81,7 @@ export interface IBooking {
 
   // Goods
   goodsType?: GoodsType;
+  goodsTypeId?: Types.ObjectId;
   goodsDescription?: string;
   goodsWeight?: number;
   goodsQuantity?: number;

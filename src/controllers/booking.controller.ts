@@ -479,9 +479,14 @@ export const createBooking = async (req: Request, res: Response) => {
 
     // Resolve goodsType: if an ObjectId was sent, look up the category; otherwise use as-is
     let resolvedGoodsType = goodsType || "PERSONAL";
+    // The app has always sent the GoodsType id here — it was resolved to the
+    // coarse BUSINESS/PERSONAL flag and then thrown away, which is why no
+    // per-category usage metric could ever exist. Keep it.
+    let resolvedGoodsTypeId: any = undefined;
     if (resolvedGoodsType && mongoose.Types.ObjectId.isValid(resolvedGoodsType)) {
       try {
         const goodsDoc = await GoodsType.findById(resolvedGoodsType);
+        if (goodsDoc) resolvedGoodsTypeId = goodsDoc._id;
         resolvedGoodsType = goodsDoc?.category || "PERSONAL";
       } catch {
         resolvedGoodsType = "PERSONAL";
@@ -548,6 +553,7 @@ export const createBooking = async (req: Request, res: Response) => {
       })),
       vehicleTypeId,
       goodsType: resolvedGoodsType,
+      goodsTypeId: resolvedGoodsTypeId,
       goodsDescription,
       // Store the validated figure the fare was actually priced from, not the
       // raw body value — the driver needs to know the weight they're lifting.
@@ -1861,7 +1867,13 @@ export const getVehicleOptions = async (req: Request, res: Response) => {
           vehicleType: type,
           fare: fare.finalFare,
           fareBreakdown: fare,
-          estimatedDuration: durationMin,
+          // Per-vehicle DISPLAY ETA: billing duration scaled by this
+          // vehicle's speed relative to the 25 km/h city model. Fares are
+          // untouched — a bike shows a shorter ETA, not a smaller time charge.
+          estimatedDuration: Math.round(
+            (Number(durationMin) || 0) *
+              (25 / Math.max(Number((type as any).avgSpeedKmph) || 25, 5)),
+          ),
           distanceKm,
           score,
           isRecommended: false, // will set below

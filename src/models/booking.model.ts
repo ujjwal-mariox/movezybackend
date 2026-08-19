@@ -81,6 +81,10 @@ const BookingSchema = new Schema<IBooking>(
       enum: ["BUSINESS", "PERSONAL"],
       default: "PERSONAL",
     },
+    // Which delivery category (GoodsType) the customer picked. Without this,
+    // per-category usage/revenue metrics were impossible — only the coarse
+    // BUSINESS/PERSONAL flag survived the booking.
+    goodsTypeId: { type: Schema.Types.ObjectId, ref: "GoodsType", index: true },
     goodsDescription: String,
     goodsWeight: Number, // in kg
     goodsQuantity: Number,

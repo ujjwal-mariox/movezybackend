@@ -8,6 +8,7 @@ import VehicleType from "../../models/vehicle-type.model";
 import VehicleCategory from "../../models/vehicle-category.model";
 import ServiceType from "../../models/service-type.model";
 import AddonService from "../../models/addon-service.model";
+import Booking from "../../models/booking.model";
 import CancellationReason from "../../models/cancellation-reason.model";
 import ProhibitedItem from "../../models/prohibited-item.model";
 import { TimeSlot, ScheduleConfig } from "../../models/time-slot.model";
@@ -40,6 +41,7 @@ function coerceVehicleTypeFields(data: Record<string, any>) {
     "minRangeKm",
     "maxRangeKm",
     "sortOrder",
+    "avgSpeedKmph",
   ];
   for (const key of boolFields) {
     if (key in data && typeof data[key] === "string") {
@@ -130,8 +132,84 @@ export const getVehicleTypes = async (req: Request, res: Response) => {
     VehicleType.countDocuments(filter),
   ]);
 
+  // Usage metrics per vehicle type, one aggregation for the page: orders
+  // handled, completed revenue, and average delivery minutes (completed trips
+  // with both timestamps only — trips without them are not counted as
+  // instant).
+  const vtIds = vehicleTypes.map((v) => v._id);
+  const usageAgg = vtIds.length
+    ? await Booking.aggregate([
+        { $match: { vehicleTypeId: { $in: vtIds } } },
+        {
+          $group: {
+            _id: "$vehicleTypeId",
+            orders: { $sum: 1 },
+            completedRevenue: {
+              $sum: {
+                $cond: [
+                  { $eq: ["$status", "COMPLETED"] },
+                  { $ifNull: ["$finalFare", 0] },
+                  0,
+                ],
+              },
+            },
+            deliveryMinutes: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ["$status", "COMPLETED"] },
+                      { $ne: ["$pickedAt", null] },
+                      { $ne: ["$completedAt", null] },
+                    ],
+                  },
+                  {
+                    $divide: [
+                      { $subtract: ["$completedAt", "$pickedAt"] },
+                      60000,
+                    ],
+                  },
+                  0,
+                ],
+              },
+            },
+            timedDeliveries: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ["$status", "COMPLETED"] },
+                      { $ne: ["$pickedAt", null] },
+                      { $ne: ["$completedAt", null] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+          },
+        },
+      ])
+    : [];
+  const usageByVt = new Map<string, any>(usageAgg.map((u: any) => [String(u._id), u]));
+  const vehicleTypesWithUsage = vehicleTypes.map((v) => {
+    const u = usageByVt.get(String(v._id));
+    return {
+      ...v.toObject(),
+      usage: {
+        orders: u?.orders ?? 0,
+        completedRevenue: Math.round(u?.completedRevenue ?? 0),
+        avgDeliveryMin:
+          u && u.timedDeliveries > 0
+            ? Math.round(u.deliveryMinutes / u.timedDeliveries)
+            : null,
+      },
+    };
+  });
+
   res.locals.data = {
-    vehicleTypes,
+    vehicleTypes: vehicleTypesWithUsage,
     pagination: { total, page: pageNum, limit: limitNum, pages: Math.ceil(total / limitNum) },
   };
 };
@@ -371,8 +449,49 @@ export const getAddonServices = async (req: Request, res: Response) => {
     AddonService.countDocuments(filter),
   ]);
 
+  // Usage per add-on across all bookings that carried it: how many times it
+  // was taken and the revenue it generated (Σ price × quantity as booked).
+  const addonIds = addonServices.map((a) => a._id);
+  const addonAgg = addonIds.length
+    ? await Booking.aggregate([
+        { $match: { "addons.addonId": { $in: addonIds } } },
+        { $unwind: "$addons" },
+        { $match: { "addons.addonId": { $in: addonIds } } },
+        {
+          $group: {
+            _id: "$addons.addonId",
+            usageCount: { $sum: 1 },
+            revenue: {
+              $sum: {
+                $multiply: [
+                  { $ifNull: ["$addons.price", 0] },
+                  { $ifNull: ["$addons.quantity", 1] },
+                ],
+              },
+            },
+          },
+        },
+      ])
+    : [];
+  const usageByAddon = new Map<string, any>(addonAgg.map((u: any) => [String(u._id), u]));
+  const totalAddonRevenue = addonAgg.reduce((sum: number, u: any) => sum + (u.revenue || 0), 0);
+  const addonServicesWithUsage = addonServices.map((a) => {
+    const u = usageByAddon.get(String(a._id));
+    const revenue = Math.round(u?.revenue ?? 0);
+    return {
+      ...a.toObject(),
+      usage: {
+        count: u?.usageCount ?? 0,
+        revenue,
+        // Share of add-on revenue among the add-ons on this page.
+        revenueSharePct:
+          totalAddonRevenue > 0 ? Math.round((revenue / totalAddonRevenue) * 100) : 0,
+      },
+    };
+  });
+
   res.locals.data = {
-    addonServices,
+    addonServices: addonServicesWithUsage,
     pagination: { total, page: pageNum, limit: limitNum, pages: Math.ceil(total / limitNum) },
   };
 };
@@ -645,8 +764,50 @@ export const getGoodsTypes = async (req: Request, res: Response) => {
     GoodsType.countDocuments(filter),
   ]);
 
+  // Usage per delivery category. goodsTypeId is only recorded on bookings
+  // created after it was added to the schema, so these figures start from that
+  // deploy — label in the UI says so rather than implying all-time coverage.
+  const gtIds = goodsTypes.map((g: any) => g._id);
+  const gtAgg = gtIds.length
+    ? await Booking.aggregate([
+        { $match: { goodsTypeId: { $in: gtIds } } },
+        {
+          $group: {
+            _id: "$goodsTypeId",
+            orders: { $sum: 1 },
+            completedRevenue: {
+              $sum: {
+                $cond: [
+                  { $eq: ["$status", "COMPLETED"] },
+                  { $ifNull: ["$finalFare", 0] },
+                  0,
+                ],
+              },
+            },
+            completedCount: {
+              $sum: { $cond: [{ $eq: ["$status", "COMPLETED"] }, 1, 0] },
+            },
+          },
+        },
+      ])
+    : [];
+  const usageByGt = new Map<string, any>(gtAgg.map((u: any) => [String(u._id), u]));
+  const goodsTypesWithUsage = goodsTypes.map((g: any) => {
+    const u = usageByGt.get(String(g._id));
+    const completed = u?.completedCount ?? 0;
+    const revenue = Math.round(u?.completedRevenue ?? 0);
+    return {
+      ...g.toObject(),
+      usage: {
+        orders: u?.orders ?? 0,
+        completedRevenue: revenue,
+        avgOrderValue: completed > 0 ? Math.round(revenue / completed) : null,
+      },
+    };
+  });
+
   res.locals.data = {
-    goodsTypes,
+    goodsTypes: goodsTypesWithUsage,
     pagination: { total, page: pageNum, limit: limitNum, pages: Math.ceil(total / limitNum) },
   };
 };
