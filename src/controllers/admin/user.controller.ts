@@ -133,6 +133,13 @@ export const getAllUsers = async (req: Request, res: Response) => {
         userId: user._id,
         status: "COMPLETED",
       });
+      // Only cancellations the CUSTOMER made count toward "risky" — a driver
+      // or system cancellation is not this user's behaviour.
+      const cancelledByUserCount = await Booking.countDocuments({
+        userId: user._id,
+        status: "CANCELLED",
+        cancelledBy: "USER",
+      });
 
       // Calculate total spent from completed bookings
       const spentAggregation = await Booking.aggregate([
@@ -151,6 +158,7 @@ export const getAllUsers = async (req: Request, res: Response) => {
         ...user.toObject(),
         bookingCount,
         completedBookings: completedCount,
+        cancelledByUserCount,
         totalSpent,
         coinBalance: coinWallet?.balance ?? 0,
         walletBalance: wallet?.balance ?? 0,

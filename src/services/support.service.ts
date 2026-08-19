@@ -170,6 +170,9 @@ export const getAllTickets = async (
     search?: string;
     dateFrom?: Date;
     dateTo?: Date;
+    /// One customer's tickets — the admin user panel's "issues" view. The
+    /// field and its index existed all along; nothing filtered on it.
+    userId?: Types.ObjectId;
   },
   page = 0,
   limit = 20,
@@ -177,6 +180,7 @@ export const getAllTickets = async (
   const query: any = {};
 
   if (filters.status) query.status = filters.status;
+  if (filters.userId) query.userId = filters.userId;
   if (filters.priority) query.priority = filters.priority;
   if (filters.category) query.category = filters.category;
   if (filters.type) query.type = filters.type;

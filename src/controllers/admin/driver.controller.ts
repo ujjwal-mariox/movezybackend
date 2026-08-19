@@ -143,6 +143,40 @@ export const getAllDrivers = async (req: Request, res: Response) => {
   // page saw no documents and hard-coded every driver to 0% compliance.
   const driverIds = drivers.map((d) => d._id);
   const kycRecords = await DriverKYC.find({ driverId: { $in: driverIds } });
+
+  // Completion rate inputs for every driver on this page, in ONE aggregation:
+  // trips that reached the driver (any status once assigned) vs completed vs
+  // cancelled BY the driver. Acceptance rate is deliberately absent — no offer
+  // or decline record is persisted anywhere (dispatch keeps an ephemeral Redis
+  // set), so an "acceptance %" here would be a made-up number.
+  const outcomeAgg = await Booking.aggregate([
+    { $match: { driverId: { $in: driverIds } } },
+    {
+      $group: {
+        _id: "$driverId",
+        assignedTotal: { $sum: 1 },
+        completed: {
+          $sum: { $cond: [{ $eq: ["$status", "COMPLETED"] }, 1, 0] },
+        },
+        cancelledByDriver: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$status", "CANCELLED"] },
+                  { $eq: ["$cancelledBy", "DRIVER"] },
+                ],
+              },
+              1,
+              0,
+            ],
+          },
+        },
+      },
+    },
+  ]);
+  const outcomeByDriver = new Map<string, any>();
+  outcomeAgg.forEach((o) => outcomeByDriver.set(String(o._id), o));
   const kycByDriver = new Map<string, any>();
   kycRecords.forEach((k) => kycByDriver.set(String(k.driverId), k));
 
@@ -168,9 +202,18 @@ export const getAllDrivers = async (req: Request, res: Response) => {
           },
         },
       ]);
+      const outcomes = outcomeByDriver.get(String(driver._id));
       return {
         ...driver.toObject(),
         completedTrips,
+        // null (not 0) when nothing was ever assigned: "no history" and
+        // "completes 0%" are different facts and must render differently.
+        completionRate:
+          outcomes && outcomes.assignedTotal > 0
+            ? Math.round((outcomes.completed / outcomes.assignedTotal) * 100)
+            : null,
+        cancelledByDriver: outcomes?.cancelledByDriver ?? 0,
+        assignedTotal: outcomes?.assignedTotal ?? 0,
         totalEarnings: earnings[0]?.net || 0,
         grossFareCollected: earnings[0]?.gross || 0,
         documents: buildDriverDocuments(
@@ -860,12 +903,34 @@ export const getDriverStats = async (req: Request, res: Response) => {
   // Real unassigned-orders count: bookings still searching for a driver.
   const unassignedOrders = await Booking.countDocuments({ status: "SEARCHING" });
 
+  // Fleet-wide counts the status strip needs. "Busy" is a driver actually
+  // carrying a booking; "idle" is online with nothing assigned — both from
+  // currentBookingId, which dispatch maintains. "Underperforming" is a rated
+  // driver below 3.5. No rating-count field exists on Driver — rating is a
+  // recomputed average defaulting to 0 — so "has been rated" is rating > 0,
+  // which keeps unrated new drivers out of a red bucket they have done
+  // nothing to earn (a real 1-star average is 1, never 0).
+  const busyDrivers = await Driver.countDocuments({
+    isDeleted: false,
+    status: "approved",
+    isOnline: true,
+    currentBookingId: { $ne: null },
+  });
+  const underperformingDrivers = await Driver.countDocuments({
+    isDeleted: false,
+    status: "approved",
+    rating: { $gt: 0, $lt: 3.5 },
+  });
+
   res.locals.data = {
     byStatus: stats,
     onlineDrivers: onlineCount,
     activeDrivers,
     inactiveDrivers,
     unassignedOrders,
+    busyDrivers,
+    idleDrivers: Math.max(onlineCount - busyDrivers, 0),
+    underperformingDrivers,
   };
 };
 

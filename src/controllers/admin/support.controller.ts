@@ -17,6 +17,7 @@ export const getAllTickets = async (req: Request, res: Response) => {
     assignedTo,
     dateFrom,
     dateTo,
+    userId,
     page = 0,
     limit = 20,
   } = req.query;
@@ -35,6 +36,7 @@ export const getAllTickets = async (req: Request, res: Response) => {
         : undefined,
       dateFrom: dateFrom ? new Date(dateFrom as string) : undefined,
       dateTo: dateTo ? new Date(dateTo as string) : undefined,
+      userId: userId ? new Types.ObjectId(userId as string) : undefined,
     },
     Number(page),
     Number(limit),
