@@ -8,6 +8,8 @@ import { FareConfig } from "../models/app-config.model";
  * Single home page API for the user app.
  * Returns active vehicle types, active promo banners, and fare config.
  */
+let cachedDeliveryCount: { value: number; at: number } | null = null;
+
 export const getHomePage = async (req: Request, res: Response) => {
   // Fetch active, non-deleted vehicle types sorted by sortOrder
   const vehicleTypes = await VehicleType.find({
@@ -44,10 +46,25 @@ export const getHomePage = async (req: Request, res: Response) => {
     .select("gstPercentage minimumFare")
     .lean();
 
+  // Total completed deliveries, for the home screen's trust ribbon. Cached in
+  // module scope for 10 minutes: the figure moves slowly and this endpoint is
+  // the app's first call on every open.
+  if (
+    !cachedDeliveryCount ||
+    Date.now() - cachedDeliveryCount.at > 10 * 60 * 1000
+  ) {
+    const Booking = (await import("../models/booking.model")).default;
+    cachedDeliveryCount = {
+      value: await Booking.countDocuments({ status: "COMPLETED" }),
+      at: Date.now(),
+    };
+  }
+
   res.locals.data = {
     vehicleTypes,
     promoBanners,
     fareConfig,
+    completedDeliveries: cachedDeliveryCount.value,
   };
 };
 

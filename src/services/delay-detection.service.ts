@@ -13,7 +13,7 @@ import { sendToUser } from "./notification.service";
 import { cache } from "../utils/redis.util";
 
 // Delay thresholds (minutes)
-const DELAY_THRESHOLD_MINUTES = 10; // notify when >10 min late
+const DELAY_THRESHOLD_MINUTES = 5; // notify when >5 min late (client spec: trigger on ETA deviation > 5 min)
 const RE_NOTIFY_COOLDOWN_MINUTES = 15; // don't re-notify within 15 min
 
 /**
