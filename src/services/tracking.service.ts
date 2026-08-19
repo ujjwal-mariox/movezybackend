@@ -461,7 +461,8 @@ export const getDriversOnMap = async (
   const driverLocations = await DriverLocation.find(query)
     .populate({
       path: "driverId",
-      select: "fullName profilePhoto isOnline currentBookingId deviceInfo",
+      select:
+        "fullName profilePhoto isOnline currentBookingId deviceInfo mobileNumber",
     })
     .limit(500);
 
@@ -480,13 +481,52 @@ export const getDriversOnMap = async (
     onMap = onMap.filter((dl: any) => allowed.has(String(dl.driverId._id)));
   }
 
+  // Pull the ETA of each driver's CURRENT booking so the map can show a red
+  // "delayed" pin. Without this the tracking feed had no notion of lateness at
+  // all — every working driver looked equally fine.
+  const activeBookingIds = onMap
+    .map((dl: any) => dl.driverId.currentBookingId)
+    .filter(Boolean);
+  const etaByBooking = new Map<string, Date | null>();
+  if (activeBookingIds.length > 0) {
+    const Booking = (await import("../models/booking.model")).default;
+    const activeBookings = await Booking.find({
+      _id: { $in: activeBookingIds },
+    })
+      .select("estimatedDropTime")
+      .lean();
+    for (const b of activeBookings as any[]) {
+      etaByBooking.set(String(b._id), b.estimatedDropTime ?? null);
+    }
+  }
+
+  const nowMs = Date.now();
+
   return onMap
     .map((dl: any) => ({
       driverId: dl.driverId._id,
       name: dl.driverId.fullName,
       profileImage: dl.driverId.profilePhoto,
       isAvailable: dl.driverId.isOnline,
+      // Fetched all along and then discarded, which is why the map's Call and
+      // View-order actions had nothing to work with.
+      phone: dl.driverId.mobileNumber,
       hasActiveBooking: !!dl.driverId.currentBookingId,
+      currentBookingId: dl.driverId.currentBookingId || null,
+      currentBookingEta: dl.driverId.currentBookingId
+        ? etaByBooking.get(String(dl.driverId.currentBookingId)) ?? null
+        : null,
+      // True only when there IS an estimate and it has passed — never a guess
+      // from "the trip feels long".
+      isDelayed: (() => {
+        const eta = dl.driverId.currentBookingId
+          ? etaByBooking.get(String(dl.driverId.currentBookingId))
+          : null;
+        return eta ? new Date(eta).getTime() < nowMs : false;
+      })(),
+      // Real speed from the location document; the panel was showing a
+      // placeholder for this.
+      speed: dl.speed ?? 0,
       location: {
         lat: dl.location.coordinates[1],
         lng: dl.location.coordinates[0],
