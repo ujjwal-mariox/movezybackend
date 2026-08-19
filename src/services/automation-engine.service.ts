@@ -354,11 +354,40 @@ const executeAction = async (rule: IAutomationRule, hit: TriggerHit) => {
  * Evaluate every active rule once. Returns a summary for logging / the manual
  * "run now" admin endpoint.
  */
+/**
+ * Runtime master switch, read fresh each run. The env kill-switch
+ * (AUTOMATION_ENGINE) still works but needs a redeploy; this AppConfig key is
+ * the emergency stop the admin panel can flip. Absent key = ON, so existing
+ * deployments keep their behaviour.
+ */
+const engineEnabled = async (): Promise<boolean> => {
+  try {
+    const { AppConfig } = await import("../models/app-config.model");
+    const doc: any = await AppConfig.findOne({
+      key: "automation_engine_enabled",
+    }).lean();
+    if (!doc) return true;
+    return !(doc.value === false || doc.value === "false");
+  } catch {
+    // Config unreadable — keep running rather than silently stopping
+    // automations on a transient DB hiccup.
+    return true;
+  }
+};
+
 export const runAllRules = async (): Promise<{
   evaluated: number;
   fired: number;
   skipped: string[];
 }> => {
+  if (!(await engineEnabled())) {
+    return {
+      evaluated: 0,
+      fired: 0,
+      skipped: ["engine disabled by automation_engine_enabled setting"],
+    };
+  }
+
   const rules = await AutomationRule.find({ isActive: true });
   let fired = 0;
   const skipped: string[] = [];
