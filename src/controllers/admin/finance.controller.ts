@@ -623,6 +623,13 @@ export const getLiveStats = async (req: Request, res: Response) => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
+    // "vs yesterday" must compare the same slice of the day — a full 24h of
+    // yesterday against a part-day today would report a fake collapse every
+    // morning. Yesterday is therefore cut at the same clock time as now.
+    const yesterdayStart = new Date(today);
+    yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+    const yesterdaySameTime = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
     const [
       totalOrders,
       liveOrders,
@@ -638,6 +645,9 @@ export const getLiveStats = async (req: Request, res: Response) => {
       driversOnTrip,
       completedToday,
       pendingToday,
+      yesterdayRevenue,
+      yesterdayCancelled,
+      yesterdayOrders,
     ] = await Promise.all([
       bookingsCollection.countDocuments({}),
       bookingsCollection.countDocuments({
@@ -691,6 +701,27 @@ export const getLiveStats = async (req: Request, res: Response) => {
         createdAt: { $gte: today },
         status: "SEARCHING",
       }),
+      // Yesterday, up to this time of day — the comparison basis for the KPI
+      // trend text. Previously the dashboard had no comparison data at all, so
+      // its trend arrows were removed rather than invented.
+      bookingsCollection
+        .aggregate([
+          {
+            $match: {
+              createdAt: { $gte: yesterdayStart, $lt: yesterdaySameTime },
+              status: "COMPLETED",
+            },
+          },
+          { $group: { _id: null, total: { $sum: "$finalFare" } } },
+        ])
+        .toArray(),
+      bookingsCollection.countDocuments({
+        createdAt: { $gte: yesterdayStart, $lt: yesterdaySameTime },
+        status: "CANCELLED",
+      }),
+      bookingsCollection.countDocuments({
+        createdAt: { $gte: yesterdayStart, $lt: yesterdaySameTime },
+      }),
     ]);
 
     const failureRate =
@@ -714,8 +745,18 @@ export const getLiveStats = async (req: Request, res: Response) => {
       delayedOrders,
       cancelledToday: todayCancelled,
       driversOnTrip,
+      // Genuinely free to take a job: online, approved, and not already
+      // carrying a booking. `activeDrivers` counts everyone online including
+      // drivers mid-trip, so labelling that "Available" overstated dispatch
+      // capacity — this is the number that can actually be assigned.
+      availableDrivers: Math.max(activeDrivers - driversOnTrip, 0),
       completedToday,
       pendingToday,
+      // Same-slice-of-day yesterday figures, for the KPI trend text.
+      yesterdayRevenue: yesterdayRevenue[0]?.total || 0,
+      yesterdayCancelled,
+      yesterdayOrders,
+      todayOrders: todayTotal,
     };
   } catch (err) {
     // Zero-filled stats are indistinguishable from a genuinely idle platform —
