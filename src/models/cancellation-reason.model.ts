@@ -9,6 +9,8 @@ export interface ICancellationReason {
   penaltyValue: number;
   isRefundable: boolean;
   refundPercentage: number;
+  /// Admin-declared business impact, for triage ordering in the panel.
+  impactLevel: "HIGH" | "MEDIUM" | "LOW";
   isActive: boolean;
   sortOrder: number;
 }
@@ -50,6 +52,11 @@ const CancellationReasonSchema = new Schema<ICancellationReason>(
       default: 100,
       min: 0,
       max: 100,
+    },
+    impactLevel: {
+      type: String,
+      enum: ["HIGH", "MEDIUM", "LOW"],
+      default: "MEDIUM",
     },
     isActive: {
       type: Boolean,

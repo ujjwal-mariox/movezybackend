@@ -7,6 +7,9 @@ export interface IProhibitedItem {
   image: string; // optional image URL (uploaded via admin)
   bgColor: string; // background color hex e.g. "#FFF3E0"
   description: string;
+  /// Admin-declared severity. Display/triage only — there is no automated
+  /// detection anywhere, so this drives ordering and badges, not enforcement.
+  riskLevel: "HIGH" | "MEDIUM" | "LOW";
   isActive: boolean;
   sortOrder: number;
 }
@@ -33,6 +36,11 @@ const ProhibitedItemSchema = new Schema<IProhibitedItem>(
     description: {
       type: String,
       default: "",
+    },
+    riskLevel: {
+      type: String,
+      enum: ["HIGH", "MEDIUM", "LOW"],
+      default: "MEDIUM",
     },
     isActive: {
       type: Boolean,

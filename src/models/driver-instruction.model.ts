@@ -5,6 +5,11 @@ export interface IDriverInstruction {
   text: string;
   icon: string;
   sortOrder: number;
+  /// Mandatory = the driver must follow it; Advisory = guidance. Display
+  /// semantics — no enforcement pipeline exists, and the panel says so.
+  instructionType: "MANDATORY" | "ADVISORY";
+  /// Bumped on every edit, so staff can tell which revision drivers saw.
+  version: number;
   isActive: boolean;
   createdBy?: Types.ObjectId;
   createdAt: Date;
@@ -27,6 +32,12 @@ const DriverInstructionSchema = new Schema<IDriverInstruction>(
       type: Number,
       default: 0,
     },
+    instructionType: {
+      type: String,
+      enum: ["MANDATORY", "ADVISORY"],
+      default: "ADVISORY",
+    },
+    version: { type: Number, default: 1 },
     isActive: {
       type: Boolean,
       default: true,

@@ -54,7 +54,7 @@ export const updateDriverInstruction = async (req: Request, res: Response) => {
   const { id } = req.params;
   const instruction = await DriverInstruction.findByIdAndUpdate(
     id,
-    req.body,
+    { ...req.body, $inc: { version: 1 } },
     { new: true },
   );
   if (!instruction) {

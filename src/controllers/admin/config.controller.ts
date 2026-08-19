@@ -575,8 +575,85 @@ export const getCancellationReasons = async (req: Request, res: Response) => {
     CancellationReason.countDocuments(filter),
   ]);
 
+  // Per-reason usage from real cancelled bookings: counts, who cancelled,
+  // the stage it happened at, and a 30d-vs-prior-30d trend. Stage is derived
+  // from timestamps (no assignedAt = before assignment; pickedAt = during
+  // delivery), not from anything self-reported.
+  const now = Date.now();
+  const d30 = new Date(now - 30 * 24 * 60 * 60 * 1000);
+  const d60 = new Date(now - 60 * 24 * 60 * 60 * 1000);
+  const cancelAgg = await Booking.aggregate([
+    { $match: { status: "CANCELLED", cancellationReasonId: { $ne: null } } },
+    {
+      $group: {
+        _id: "$cancellationReasonId",
+        count: { $sum: 1 },
+        byUser: { $sum: { $cond: [{ $eq: ["$cancelledBy", "USER"] }, 1, 0] } },
+        byDriver: { $sum: { $cond: [{ $eq: ["$cancelledBy", "DRIVER"] }, 1, 0] } },
+        beforeAssignment: { $sum: { $cond: [{ $eq: ["$assignedAt", null] }, 1, 0] } },
+        duringDelivery: { $sum: { $cond: [{ $ne: ["$pickedAt", null] }, 1, 0] } },
+        last30: { $sum: { $cond: [{ $gte: ["$cancelledAt", d30] }, 1, 0] } },
+        prev30: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $gte: ["$cancelledAt", d60] },
+                  { $lt: ["$cancelledAt", d30] },
+                ],
+              },
+              1,
+              0,
+            ],
+          },
+        },
+      },
+    },
+  ]);
+  const usageByReason = new Map<string, any>(cancelAgg.map((u: any) => [String(u._id), u]));
+  const reasonsWithUsage = reasons.map((r: any) => {
+    const u = usageByReason.get(String(r._id));
+    const count = u?.count ?? 0;
+    const before = u?.beforeAssignment ?? 0;
+    const during = u?.duringDelivery ?? 0;
+    return {
+      ...r.toObject(),
+      usage: {
+        count,
+        byUser: u?.byUser ?? 0,
+        byDriver: u?.byDriver ?? 0,
+        beforeAssignment: before,
+        duringDelivery: during,
+        afterAssignment: Math.max(count - before - during, 0),
+        last30: u?.last30 ?? 0,
+        prev30: u?.prev30 ?? 0,
+      },
+    };
+  });
+
+  // Panel-level summary: total cancellations, rate over all bookings, split.
+  const [totalBookings, totalCancelled, splitAgg] = await Promise.all([
+    Booking.countDocuments({}),
+    Booking.countDocuments({ status: "CANCELLED" }),
+    Booking.aggregate([
+      { $match: { status: "CANCELLED" } },
+      { $group: { _id: "$cancelledBy", count: { $sum: 1 } } },
+    ]),
+  ]);
+  const splitMap = new Map<string, number>(splitAgg.map((x: any) => [x._id || "UNKNOWN", x.count]));
+
   res.locals.data = {
-    reasons,
+    reasons: reasonsWithUsage,
+    summary: {
+      totalCancellations: totalCancelled,
+      cancellationRate:
+        totalBookings > 0
+          ? Number(((totalCancelled / totalBookings) * 100).toFixed(1))
+          : 0,
+      byUser: splitMap.get("USER") ?? 0,
+      byDriver: splitMap.get("DRIVER") ?? 0,
+      bySystem: (splitMap.get("SYSTEM") ?? 0) + (splitMap.get("ADMIN") ?? 0) + (splitMap.get("UNKNOWN") ?? 0),
+    },
     pagination: { total, page: pageNum, limit: limitNum, pages: Math.ceil(total / limitNum) },
   };
 };
