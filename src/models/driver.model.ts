@@ -121,6 +121,9 @@ const DriverSchema = new Schema<IDriver>(
     languages: [String],
 
     // Bank Details
+    // Which onboarding-reminder stages (hours since signup) were already
+    // sent, so the scheduler nudges once per stage across restarts.
+    onboardingRemindersSent: [{ type: Number }],
     bankDetails: {
       accountHolderName: String,
       bankName: String,

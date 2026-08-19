@@ -26,6 +26,8 @@ import VehicleTypeModel from "../models/vehicle-type.model";
 import DriverKycModel from "../models/driver-kyc.model";
 import VehicleModel from "../models/vehicle.model";
 import OnboardingCoupon from "../models/onboarding-coupon.model";
+import DispatchOffer from "../models/dispatch-offer.model";
+import InstructionAck from "../models/instruction-ack.model";
 import * as PaymentService from "../services/payment.service";
 import { Notification } from "../models/notification.model";
 import * as IncentiveService from "../services/incentive.service";
@@ -430,9 +432,33 @@ export const getDashboard = async (
         current: currentBooking
           ? mapDashboardBooking(currentBooking, commissionPercent)
           : null,
-        pending: pendingBookings.map((booking) =>
-          mapDashboardBooking(booking, commissionPercent),
-        ),
+        pending: await (async () => {
+          // Attach this driver's own offer window per pending booking so the
+          // Take Booking screen can render a REAL countdown. REST-loaded
+          // offers used to carry no expiry at all — which is why the old
+          // countdown was removed as invented. No offer row = no expiresAt =
+          // no timer, never a guessed one.
+          const ids = pendingBookings.map((b: any) => b._id);
+          const myOffers = ids.length
+            ? await DispatchOffer.find({
+                bookingId: { $in: ids },
+                driverId,
+                response: "PENDING",
+              })
+                .select("bookingId expiresAt")
+                .lean()
+            : [];
+          const expiryByBooking = new Map(
+            myOffers.map((o: any) => [String(o.bookingId), o.expiresAt]),
+          );
+          return pendingBookings.map((booking: any) => ({
+            ...mapDashboardBooking(booking, commissionPercent),
+            offerExpiresAt:
+              expiryByBooking.get(String(booking._id))?.toISOString?.() ??
+              expiryByBooking.get(String(booking._id)) ??
+              null,
+          }));
+        })(),
         completed: completedBookings.map((booking) =>
           mapDashboardBooking(booking, commissionPercent),
         ),
@@ -1304,6 +1330,22 @@ export const acceptBooking = async (
       currentBookingId: new Types.ObjectId(bookingId),
     });
 
+    // Record the offer outcome: this driver ACCEPTED; every other driver's
+    // still-pending offer on this booking lapses now — their ring stopped the
+    // moment the job was taken.
+    try {
+      await DispatchOffer.updateOne(
+        { bookingId: new Types.ObjectId(bookingId), driverId },
+        { $set: { response: "ACCEPTED", respondedAt: new Date() } },
+      );
+      await DispatchOffer.updateMany(
+        { bookingId: new Types.ObjectId(bookingId), response: "PENDING" },
+        { $set: { response: "EXPIRED", respondedAt: new Date() } },
+      );
+    } catch (offerErr) {
+      console.error("accept: offer record failed (non-fatal)", offerErr);
+    }
+
     // Get updated booking
     const booking = await BookingModel.findById(bookingId)
       .populate("userId", "fullName")
@@ -1365,6 +1407,20 @@ export const rejectBooking = async (
   try {
     const driverId = (req as any).driverId;
     const { bookingId } = req.params;
+
+    // A skip is a real decision — record it against the persisted offer.
+    try {
+      await DispatchOffer.updateOne(
+        {
+          bookingId: new Types.ObjectId(bookingId),
+          driverId: (req as any).driverId,
+          response: "PENDING",
+        },
+        { $set: { response: "SKIPPED", respondedAt: new Date() } },
+      );
+    } catch (offerErr) {
+      console.error("reject: offer record failed (non-fatal)", offerErr);
+    }
 
     // Use dispatch service to handle rejection
     await BookingDispatchService.handleDriverRejection(bookingId, driverId);
@@ -4232,6 +4288,84 @@ export const applyDriverReferralCode = async (
       rewardAmount: REFEREE_REWARD_AMOUNT,
     };
     req.msg = "referral_applied";
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * GET /driver/app/bookings/:bookingId/instruction-gate
+ * The mandatory instructions the driver must acknowledge before starting this
+ * trip, and whether they already have. No mandatory instructions = no gate.
+ */
+export const getTripInstructionGate = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  try {
+    const driverId = (req as any).driverId;
+    const { bookingId } = req.params;
+
+    const required = await DriverInstruction.find({
+      isActive: true,
+      instructionType: "MANDATORY",
+    })
+      .sort({ sortOrder: 1 })
+      .select("text icon version")
+      .lean();
+
+    const ack = await InstructionAck.findOne({
+      driverId: new Types.ObjectId(driverId),
+      bookingId: new Types.ObjectId(bookingId),
+    }).lean();
+
+    req.rData = {
+      required,
+      acknowledged: !!ack,
+    };
+    req.msg = "instruction_gate";
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /driver/app/bookings/:bookingId/acknowledge-instructions
+ * Records the tap-through. Idempotent per trip.
+ */
+export const acknowledgeTripInstructions = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  try {
+    const driverId = (req as any).driverId;
+    const { bookingId } = req.params;
+    const { instructionIds } = req.body || {};
+
+    await InstructionAck.findOneAndUpdate(
+      {
+        driverId: new Types.ObjectId(driverId),
+        bookingId: new Types.ObjectId(bookingId),
+      },
+      {
+        $set: {
+          instructionIds: Array.isArray(instructionIds)
+            ? instructionIds
+                .filter((id: any) => mongoose.Types.ObjectId.isValid(id))
+                .map((id: any) => new Types.ObjectId(id))
+            : [],
+          acknowledgedAt: new Date(),
+        },
+      },
+      { upsert: true },
+    );
+
+    req.rData = { acknowledged: true };
+    req.msg = "instructions_acknowledged";
     next();
   } catch (error) {
     next(error);

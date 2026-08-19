@@ -82,6 +82,11 @@ export interface IBooking {
   // Goods
   goodsType?: GoodsType;
   goodsTypeId?: Types.ObjectId;
+  prohibitedWarning?: {
+    itemId?: Types.ObjectId;
+    itemName?: string;
+    matchedKeyword?: string;
+  };
   goodsDescription?: string;
   goodsWeight?: number;
   goodsQuantity?: number;

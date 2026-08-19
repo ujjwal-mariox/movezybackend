@@ -10,6 +10,15 @@ export interface IProhibitedItem {
   /// Admin-declared severity. Display/triage only — there is no automated
   /// detection anywhere, so this drives ordering and badges, not enforcement.
   riskLevel: "HIGH" | "MEDIUM" | "LOW";
+  /// Words/phrases matched (case-insensitively) against the customer's goods
+  /// description at booking time. Empty = the item is list-display only.
+  keywords: string[];
+  /// What a keyword match does. WARN flags the booking for admin visibility;
+  /// BLOCK refuses it with a message naming the item. (Require-approval needs
+  /// a hold-state + review queue and is deliberately not offered yet.)
+  actionRule: "WARN" | "BLOCK";
+  violationCount: number;
+  blockedCount: number;
   isActive: boolean;
   sortOrder: number;
 }
@@ -42,6 +51,14 @@ const ProhibitedItemSchema = new Schema<IProhibitedItem>(
       enum: ["HIGH", "MEDIUM", "LOW"],
       default: "MEDIUM",
     },
+    keywords: [{ type: String, trim: true, lowercase: true }],
+    actionRule: {
+      type: String,
+      enum: ["WARN", "BLOCK"],
+      default: "WARN",
+    },
+    violationCount: { type: Number, default: 0 },
+    blockedCount: { type: Number, default: 0 },
     isActive: {
       type: Boolean,
       default: true,

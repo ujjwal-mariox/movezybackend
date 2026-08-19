@@ -22,8 +22,22 @@ export const getDriverInstructions = async (req: Request, res: Response) => {
     DriverInstruction.countDocuments(filter),
   ]);
 
+  // Per-instruction acknowledgment counts — the usage stat the panel shows.
+  const InstructionAck = (await import("../../models/instruction-ack.model"))
+    .default;
+  const ackAgg = await InstructionAck.aggregate([
+    { $unwind: "$instructionIds" },
+    { $group: { _id: "$instructionIds", count: { $sum: 1 } } },
+  ]);
+  const ackByInstruction = new Map(
+    ackAgg.map((a: any) => [String(a._id), a.count]),
+  );
+
   res.locals.data = {
-    instructions,
+    instructions: instructions.map((ins) => ({
+      ...ins.toObject(),
+      ackCount: ackByInstruction.get(String(ins._id)) ?? 0,
+    })),
     pagination: {
       total,
       page: pageNum,

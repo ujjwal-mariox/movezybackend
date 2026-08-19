@@ -8,8 +8,8 @@ import VehicleCategory from "../models/vehicle-category.model";
 import PromoCode from "../models/promo-code.model";
 import AddonService from "../models/addon-service.model";
 import GoodsType from "../models/goods-type.model";
-import CancellationReason from "../models/cancellation-reason.model";
 import ProhibitedItem from "../models/prohibited-item.model";
+import CancellationReason from "../models/cancellation-reason.model";
 import { TimeSlot, ScheduleConfig } from "../models/time-slot.model";
 import { FareConfig } from "../models/app-config.model";
 import * as FareService from "../services/fare.service";
@@ -497,6 +497,54 @@ export const createBooking = async (req: Request, res: Response) => {
       resolvedGoodsType = "PERSONAL";
     }
 
+    // ── Prohibited-goods screening ──
+    // Plain keyword matching on the customer's free-text description — not AI,
+    // and labeled as such in the admin panel. BLOCK refuses the booking with a
+    // message naming the item; WARN lets it through flagged for ops. Matching
+    // is word-boundary-ish (substring on lowercased text) and counts are
+    // incremented so the panel's violation KPIs are real figures.
+    let prohibitedWarningHit:
+      | { itemId: any; itemName: string; matchedKeyword: string }
+      | undefined;
+    const descriptionText = String(goodsDescription || "").toLowerCase();
+    if (descriptionText.trim().length > 0) {
+      const screenItems = await ProhibitedItem.find({
+        isActive: true,
+        keywords: { $exists: true, $ne: [] },
+      })
+        .select("name keywords actionRule")
+        .lean();
+      for (const item of screenItems as any[]) {
+        const matched = (item.keywords || []).find(
+          (k: string) => k && descriptionText.includes(String(k).toLowerCase()),
+        );
+        if (!matched) continue;
+        if (item.actionRule === "BLOCK") {
+          await ProhibitedItem.updateOne(
+            { _id: item._id },
+            { $inc: { blockedCount: 1 } },
+          );
+          return res.status(400).json({
+            success: false,
+            message: `"${item.name}" cannot be transported on Movezy. Please review the restricted items list.`,
+            code: 0,
+          });
+        }
+        // First WARN match wins; keep screening only for a BLOCK.
+        if (!prohibitedWarningHit) {
+          prohibitedWarningHit = {
+            itemId: item._id,
+            itemName: item.name,
+            matchedKeyword: matched,
+          };
+          await ProhibitedItem.updateOne(
+            { _id: item._id },
+            { $inc: { violationCount: 1 } },
+          );
+        }
+      }
+    }
+
     // Calculate totals for required schema fields
     // Use the figure the fare service actually charged. Re-deriving it as
     // price × quantity ignored priceType, so the stored addonTotal (and the
@@ -554,6 +602,7 @@ export const createBooking = async (req: Request, res: Response) => {
       vehicleTypeId,
       goodsType: resolvedGoodsType,
       goodsTypeId: resolvedGoodsTypeId,
+      prohibitedWarning: prohibitedWarningHit,
       goodsDescription,
       // Store the validated figure the fare was actually priced from, not the
       // raw body value — the driver needs to know the weight they're lifting.

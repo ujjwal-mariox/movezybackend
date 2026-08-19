@@ -10,6 +10,7 @@ import {
 import * as notificationService from "../../services/notification.service";
 import * as mqttUtil from "../../utils/mqtt.util";
 import * as bookingDispatchService from "../../services/booking-dispatch.service";
+import { runAutoAssignSweep } from "../../services/auto-assign.service";
 import * as PaymentService from "../../services/payment.service";
 import * as EnterpriseService from "../../services/enterprise.service";
 
@@ -560,113 +561,13 @@ export const assignDriver = async (req: Request, res: Response) => {
  * Shared by manual assign and auto-assign. Assumes the booking is SEARCHING
  * and the driver is valid/available (caller checks).
  */
-const assignBookingToDriver = async (booking: any, driver: any) => {
-  booking.driverId = driver._id;
-  booking.status = "ASSIGNED";
-  booking.assignedAt = new Date();
-  await booking.save();
-
-  driver.currentBookingId = booking._id;
-  await driver.save();
-
-  try {
-    const userIdStr = String(booking.userId);
-    const driverIdStr = String(driver._id);
-    const bookingIdStr = String(booking._id);
-
-    emitBookingUpdate(bookingIdStr, userIdStr, driverIdStr, "ASSIGNED", {
-      driverId: driverIdStr,
-      driverName: driver.fullName,
-      driverPhone: driver.mobileNumber,
-      assignedBy: "ADMIN",
-    });
-    emitToUser(userIdStr, "booking:accepted", {
-      bookingId: bookingIdStr,
-      driverId: driverIdStr,
-      driverName: driver.fullName,
-    });
-    await notificationService
-      .sendToDriver(
-        new Types.ObjectId(driverIdStr),
-        "BOOKING",
-        "New Booking Assigned",
-        "You have been auto-assigned a new booking.",
-        { bookingId: bookingIdStr },
-        booking._id as Types.ObjectId,
-        "Booking",
-      )
-      .catch(() => null);
-  } catch (err) {
-    console.error("Auto-assign: propagation error", err);
-  }
-};
-
-/**
- * POST /admin/bookings/auto-assign
- * For every SEARCHING booking (or a single `bookingId` in the body), find the
- * nearest available driver via the dispatch service and assign directly.
- * Returns a summary. Drivers must be online with a matching active vehicle.
- */
 export const autoAssignBookings = async (req: Request, res: Response) => {
   const { bookingId } = req.body || {};
-
-  const query: any = { status: "SEARCHING" };
-  if (bookingId) query._id = new Types.ObjectId(bookingId);
-
-  const bookings = await Booking.find(query).sort({ createdAt: 1 }).limit(50);
-
-  let assigned = 0;
-  const results: Array<{
-    bookingId: string;
-    status: "assigned" | "no_driver" | "no_pickup";
-    driverId?: string;
-    driverName?: string;
-  }> = [];
-  // Track drivers assigned within THIS run so we don't double-assign them.
-  const usedDrivers = new Set<string>();
-
-  for (const booking of bookings) {
-    const lat = booking.pickup?.lat;
-    const lng = booking.pickup?.lng;
-    if (lat == null || lng == null) {
-      results.push({ bookingId: String(booking._id), status: "no_pickup" });
-      continue;
-    }
-
-    const nearby = await bookingDispatchService.findNearbyDrivers(
-      lat,
-      lng,
-      String(booking.vehicleTypeId || ""),
-    );
-
-    // Pick the nearest driver not already used in this run.
-    const pick = nearby.find((d) => !usedDrivers.has(d.driverId));
-    if (!pick) {
-      results.push({ bookingId: String(booking._id), status: "no_driver" });
-      continue;
-    }
-
-    const driver = await Driver.findById(pick.driverId);
-    if (!driver) {
-      results.push({ bookingId: String(booking._id), status: "no_driver" });
-      continue;
-    }
-
-    await assignBookingToDriver(booking, driver);
-    usedDrivers.add(pick.driverId);
-    assigned += 1;
-    results.push({
-      bookingId: String(booking._id),
-      status: "assigned",
-      driverId: String(driver._id),
-      driverName: driver.fullName,
-    });
-  }
-
+  // Shared sweep — the job scheduler runs the SAME code on a timer, so the
+  // button and the unattended run can never drift apart.
+  const result = await runAutoAssignSweep(bookingId);
   res.locals.data = {
-    message: `Auto-assigned ${assigned} of ${bookings.length} searching booking(s)`,
-    assigned,
-    evaluated: bookings.length,
-    results,
+    message: `Auto-assigned ${result.assigned} of ${result.evaluated} searching booking(s)`,
+    ...result,
   };
 };

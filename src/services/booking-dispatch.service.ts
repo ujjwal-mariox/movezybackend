@@ -361,6 +361,30 @@ export const dispatchBookingToDrivers = async (
     // Send request to each nearby driver
     for (const driver of nearbyDrivers) {
       try {
+        // Persist the offer. Redis is ephemeral (and optional) infrastructure;
+        // this row is what makes acceptance rate computable at all. Upsert on
+        // (booking, driver): a re-dispatch refreshes the window instead of
+        // double-counting the driver.
+        try {
+          const DispatchOffer = (
+            await import("../models/dispatch-offer.model")
+          ).default;
+          await DispatchOffer.findOneAndUpdate(
+            { bookingId: booking._id, driverId: driver.driverId },
+            {
+              $set: {
+                expiresAt: new Date(bookingData.expiresAt),
+                response: "PENDING",
+                respondedAt: undefined,
+              },
+              $setOnInsert: { offeredAt: new Date() },
+            },
+            { upsert: true },
+          );
+        } catch (offerErr) {
+          console.error("dispatch: offer persist failed (non-fatal)", offerErr);
+        }
+
         // Mark driver as having a pending request
         await redis.setEx(
           `${DRIVER_PENDING_BOOKING_KEY}${driver.driverId}`,

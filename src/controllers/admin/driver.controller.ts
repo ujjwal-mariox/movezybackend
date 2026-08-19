@@ -177,6 +177,28 @@ export const getAllDrivers = async (req: Request, res: Response) => {
   ]);
   const outcomeByDriver = new Map<string, any>();
   outcomeAgg.forEach((o) => outcomeByDriver.set(String(o._id), o));
+
+  // Acceptance rate from persisted dispatch offers (accruing since the
+  // DispatchOffer collection was introduced). Responded = accepted + skipped
+  // + expired: letting an offer ring out counts against acceptance the same
+  // way declining does.
+  const DispatchOffer = (await import("../../models/dispatch-offer.model"))
+    .default;
+  const offerAgg = await DispatchOffer.aggregate([
+    { $match: { driverId: { $in: driverIds }, response: { $ne: "PENDING" } } },
+    {
+      $group: {
+        _id: "$driverId",
+        offers: { $sum: 1 },
+        accepted: {
+          $sum: { $cond: [{ $eq: ["$response", "ACCEPTED"] }, 1, 0] },
+        },
+      },
+    },
+  ]);
+  const offersByDriver = new Map<string, any>(
+    offerAgg.map((o: any) => [String(o._id), o]),
+  );
   const kycByDriver = new Map<string, any>();
   kycRecords.forEach((k) => kycByDriver.set(String(k.driverId), k));
 
@@ -203,6 +225,7 @@ export const getAllDrivers = async (req: Request, res: Response) => {
         },
       ]);
       const outcomes = outcomeByDriver.get(String(driver._id));
+      const offers = offersByDriver.get(String(driver._id));
       return {
         ...driver.toObject(),
         completedTrips,
@@ -214,6 +237,12 @@ export const getAllDrivers = async (req: Request, res: Response) => {
             : null,
         cancelledByDriver: outcomes?.cancelledByDriver ?? 0,
         assignedTotal: outcomes?.assignedTotal ?? 0,
+        // Null until this driver has any resolved offers on record.
+        acceptanceRate:
+          offers && offers.offers > 0
+            ? Math.round((offers.accepted / offers.offers) * 100)
+            : null,
+        offersReceived: offers?.offers ?? 0,
         totalEarnings: earnings[0]?.net || 0,
         grossFareCollected: earnings[0]?.gross || 0,
         documents: buildDriverDocuments(

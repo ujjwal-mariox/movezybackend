@@ -16,6 +16,7 @@ import { initializeRazorpay } from "./services/payment.service";
 import { initializeFirebase } from "./services/notification.service";
 import { startDelayDetection } from "./services/delay-detection.service";
 import { startAutomationEngine } from "./services/automation-engine.service";
+import { startJobScheduler } from "./services/job-scheduler.service";
 import { startReportScheduler } from "./services/scheduled-report.service";
 import { startOnboardingReminders } from "./services/onboarding-reminder.service";
 import { startScheduledDispatch } from "./services/scheduled-dispatch.service";
@@ -264,6 +265,7 @@ const preflight = () => {
     startDelayDetection();
     startOnboardingReminders();
     startAutomationEngine();
+    startJobScheduler();
     startReportScheduler();
     startScheduledDispatch();
   });

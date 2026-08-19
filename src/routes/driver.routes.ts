@@ -492,6 +492,18 @@ driverRouter.post(
 // SUPPORT
 // =====================
 
+// Mandatory-instruction gate for a trip
+driverRouter.get(
+  "/bookings/:bookingId/instruction-gate",
+  ErrorHandlerMiddleware(DriverController.getTripInstructionGate),
+  ResponseMiddleware,
+);
+driverRouter.post(
+  "/bookings/:bookingId/acknowledge-instructions",
+  ErrorHandlerMiddleware(DriverController.acknowledgeTripInstructions),
+  ResponseMiddleware,
+);
+
 // Raise support ticket
 driverRouter.post(
   "/support/ticket",

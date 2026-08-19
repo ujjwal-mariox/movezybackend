@@ -100,6 +100,8 @@ export interface IDriver {
 
   // Onboarding Reminders
   lastOnboardingReminder?: Date;
+  /// Reminder stages (hours since signup) already sent: subset of [4,24,48].
+  onboardingRemindersSent?: number[];
 
   // Daily Checklist
   lastChecklistAt?: Date;

@@ -85,6 +85,13 @@ const BookingSchema = new Schema<IBooking>(
     // per-category usage/revenue metrics were impossible — only the coarse
     // BUSINESS/PERSONAL flag survived the booking.
     goodsTypeId: { type: Schema.Types.ObjectId, ref: "GoodsType", index: true },
+    // Set when the goods description matched a WARN-rule prohibited item —
+    // the booking proceeds, but ops can see what tripped and where.
+    prohibitedWarning: {
+      itemId: { type: Schema.Types.ObjectId, ref: "ProhibitedItem" },
+      itemName: String,
+      matchedKeyword: String,
+    },
     goodsDescription: String,
     goodsWeight: Number, // in kg
     goodsQuantity: Number,
