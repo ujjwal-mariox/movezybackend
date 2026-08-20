@@ -106,6 +106,13 @@ export const getAllDrivers = async (req: Request, res: Response) => {
         "rejected",
       ],
     };
+  } else if (status === "pending_verification") {
+    // Exactly what the dashboard's "Pending Driver Verifications" tile counts
+    // (reports.controller: documents_uploaded + under_verification). The tile
+    // used to link to document_not_complete, a SUPERSET that also includes
+    // draft/vehicle_added/rejected — so the admin clicked a number and landed
+    // on a longer list than the number promised.
+    query.status = { $in: ["documents_uploaded", "under_verification"] };
   } else if (status === "blocked") {
     query.status = "suspended";
   } else if (status) {

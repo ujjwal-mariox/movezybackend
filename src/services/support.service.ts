@@ -190,7 +190,18 @@ export const getAllTickets = async (
 ) => {
   const query: any = {};
 
-  if (filters.status) query.status = filters.status;
+  // Accept a comma-separated list ("OPEN,IN_PROGRESS") as well as one status.
+  // The dashboard's "Open Tickets" tile counts OPEN + IN_PROGRESS together, so
+  // with only single-status filtering it had to link to the UNFILTERED list —
+  // the admin clicked a number and landed on a page including RESOLVED and
+  // CLOSED rows, which is not the filtered view they asked for.
+  if (filters.status) {
+    const statuses = String(filters.status)
+      .split(",")
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean);
+    query.status = statuses.length > 1 ? { $in: statuses } : statuses[0];
+  }
   if (filters.userId) query.userId = filters.userId;
   if (filters.priority) query.priority = filters.priority;
   if (filters.category) query.category = filters.category;

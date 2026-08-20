@@ -95,14 +95,32 @@ const resolveAddonsForFare = async (
   // the request: partner count multiplies the charge, so a client-supplied
   // value would be the same manipulation hole `loadingUnloadingCharge` was.
   const KG_PER_PARTNER = 100;
-  const LOADING_CODES = new Set(["LDUNLD", "LDING", "UNLD"]);
+  // Which add-ons are "a person comes and lifts things". Matched the same way
+  // the app decides to ask the Load Assist questions (AddonService
+  // .needsLoadAssist): PER_FLOOR pricing, a loading-ish admin category, or a
+  // known code spelling. The previous hardcoded {LDUNLD,LDING,UNLD} set did
+  // not match this repo's own seed (LOADING/UNLOADING, category
+  // LOADING_UNLOADING), so on a freshly seeded database the partner-count
+  // multiplier silently never applied and these add-ons billed for one partner
+  // regardless of weight.
+  const KNOWN_LOADING_CODES = new Set([
+    "LDUNLD",
+    "LDING",
+    "UNLD",
+    "LOADING",
+    "UNLOADING",
+  ]);
+  const isLoadingAddon = (doc: any): boolean =>
+    String(doc.priceType || "").toUpperCase() === "PER_FLOOR" ||
+    String(doc.category || "").toUpperCase().includes("LOAD") ||
+    KNOWN_LOADING_CODES.has(String(doc.code || "").toUpperCase());
   const partnerCount = Math.max(1, Math.ceil(goodsKg / KG_PER_PARTNER));
 
   return addonDocs.map((doc) => ({
     addonId: doc._id,
     name: doc.name,
     price: doc.price,
-    quantity: LOADING_CODES.has(doc.code) ? partnerCount : 1,
+    quantity: isLoadingAddon(doc) ? partnerCount : 1,
     // Without this the fare service treated every add-on as FIXED, so
     // Insurance (2% of order value) billed a flat ₹2.
     priceType: doc.priceType,
