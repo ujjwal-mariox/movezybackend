@@ -484,12 +484,19 @@ export const createRole = async (req: Request, res: Response) => {
     });
   }
 
-  // Check if role name already exists
+  // Check if role name already exists.
+  //
+  // deleteRole only sets isActive:false, and `name` carries a unique index —
+  // so a deleted role's name stayed reserved forever and could never be
+  // created again ("Role name already exists" for a role the admin cannot
+  // see). A name belonging to a soft-deleted role is therefore reusable: the
+  // row is revived with the new definition rather than rejected, which also
+  // keeps its _id and audit history intact.
   const existingRole = await Role.findOne({
     name: { $regex: new RegExp(`^${name}$`, "i") },
   });
 
-  if (existingRole) {
+  if (existingRole && existingRole.isActive !== false) {
     return res.status(400).json({
       success: false,
       message: "Role name already exists",
@@ -509,13 +516,33 @@ export const createRole = async (req: Request, res: Response) => {
     });
   }
 
-  const newRole = await Role.create({
-    name,
-    description,
-    permissions: permissions || [],
-    isSystem: false,
-    createdBy: req.adminId,
-  });
+  // Revive the soft-deleted namesake if there is one; otherwise create fresh.
+  const newRole = existingRole
+    ? await Role.findByIdAndUpdate(
+        existingRole._id,
+        {
+          name,
+          description,
+          permissions: permissions || [],
+          isActive: true,
+          createdBy: req.adminId,
+        },
+        { new: true },
+      )
+    : await Role.create({
+        name,
+        description,
+        permissions: permissions || [],
+        isSystem: false,
+        createdBy: req.adminId,
+      });
+
+  if (!newRole) {
+    return res.status(500).json({
+      success: false,
+      message: "Could not create the role. Please try again.",
+    });
+  }
 
   await auditFromRequest(req, {
     action: "CREATE",

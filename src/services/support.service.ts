@@ -218,14 +218,41 @@ export const getAllTickets = async (
     if (filters.dateTo) query.createdAt.$lte = filters.dateTo;
   }
 
-  const tickets = await SupportTicket.find(query)
-    .populate("userId", "fullName mobileNumber email")
-    .populate("driverId", "fullName mobileNumber email")
-    .populate("bookingId", "bookingNumber status")
-    .populate("assignedTo", "fullName email")
-    .sort({ priority: -1, createdAt: -1 })
-    .skip(page * limit)
-    .limit(limit);
+  // Rank priority NUMERICALLY. `.sort({ priority: -1 })` sorted the string
+  // values, so descending alphabetical order was URGENT > MEDIUM > LOW > HIGH
+  // — HIGH, the second most urgent bucket, sorted BELOW low-priority tickets
+  // and sat at the bottom of the admin queue. An aggregation ranks them
+  // correctly without a schema change or a backfill of existing rows.
+  const ranked = await SupportTicket.aggregate([
+    { $match: query },
+    {
+      $addFields: {
+        _priorityRank: {
+          $switch: {
+            branches: [
+              { case: { $eq: ["$priority", "URGENT"] }, then: 4 },
+              { case: { $eq: ["$priority", "HIGH"] }, then: 3 },
+              { case: { $eq: ["$priority", "MEDIUM"] }, then: 2 },
+              { case: { $eq: ["$priority", "LOW"] }, then: 1 },
+            ],
+            default: 0,
+          },
+        },
+      },
+    },
+    { $sort: { _priorityRank: -1, createdAt: -1 } },
+    { $skip: page * limit },
+    { $limit: limit },
+    { $project: { _priorityRank: 0 } },
+  ]);
+
+  // aggregate() bypasses populate(), so hydrate the refs the admin list reads.
+  const tickets = await SupportTicket.populate(ranked, [
+    { path: "userId", select: "fullName mobileNumber email" },
+    { path: "driverId", select: "fullName mobileNumber email" },
+    { path: "bookingId", select: "bookingNumber status" },
+    { path: "assignedTo", select: "fullName email" },
+  ]);
 
   const total = await SupportTicket.countDocuments(query);
 

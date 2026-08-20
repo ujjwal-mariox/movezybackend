@@ -205,6 +205,9 @@ export const PERMISSION_GROUPS = {
     PERMISSIONS.ENTERPRISES_CREATE,
     PERMISSIONS.ENTERPRISES_UPDATE,
     PERMISSIONS.ENTERPRISES_APPROVE,
+    // Enforced on PUT /enterprises/:id/suspend but was in no group, so the
+    // role editor could not grant it to anyone.
+    PERMISSIONS.ENTERPRISES_SUSPEND,
   ],
   "SOS/Emergency": [
     PERMISSIONS.SOS_VIEW,
@@ -220,6 +223,10 @@ export const PERMISSION_GROUPS = {
     PERMISSIONS.SUPPORT_VIEW,
     PERMISSIONS.SUPPORT_RESPOND,
     PERMISSIONS.SUPPORT_RESOLVE,
+    // Enforced on the ticket-assign route and held by the seeded Support
+    // Agent role, yet absent from every group — so it was ungrantable to any
+    // new role through the panel.
+    PERMISSIONS.SUPPORT_ASSIGN,
   ],
   "Staff Management": [
     PERMISSIONS.STAFF_VIEW,
