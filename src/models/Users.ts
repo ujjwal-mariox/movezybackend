@@ -3,6 +3,15 @@ import { IUser } from "../interfaces/users";
 
 const UserSchema: Schema<IUser> = new Schema(
   {
+    // Short display ID ("CUS-0042") for admin search and support calls —
+    // allocated by entity-code.service at signup, backfilled on boot for
+    // accounts that predate it. Sparse: uniqueness only among assigned codes.
+    userCode: {
+      type: String,
+      unique: true,
+      sparse: true,
+      index: true,
+    },
     fullName: {
       type: String,
       default: "",

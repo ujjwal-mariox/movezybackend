@@ -3,6 +3,17 @@ import { IDriver } from "../interfaces/driver";
 
 const DriverSchema = new Schema<IDriver>(
   {
+    // Short display ID ("DRV-0042") for admin search and support calls —
+    // allocated by entity-code.service at signup, backfilled on boot for
+    // drivers that predate it. Sparse: uniqueness only among assigned codes,
+    // so pre-backfill rows don't collide on null.
+    driverCode: {
+      type: String,
+      unique: true,
+      sparse: true,
+      index: true,
+    },
+
     mobileNumber: {
       type: String,
       required: true,

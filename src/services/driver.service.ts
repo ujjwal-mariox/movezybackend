@@ -1,12 +1,21 @@
 import { Types } from "mongoose";
 import Driver from "../models/driver.model";
 import { IDriver, DriverStatus } from "../interfaces/driver";
+import { generateEntityCode } from "./entity-code.service";
 
 /**
- * Create driver
+ * Create driver — allocates the short display ID ("DRV-0042") admins search
+ * by. Allocation failure doesn't block signup; the boot backfill repairs any
+ * driver left without a code.
  */
 export const createDriver = async (data: Partial<IDriver>) => {
-  return await Driver.create(data);
+  let driverCode: string | undefined;
+  try {
+    driverCode = await generateEntityCode("driver");
+  } catch (err) {
+    console.error("driverCode allocation failed (backfill will repair):", err);
+  }
+  return await Driver.create({ ...data, ...(driverCode && { driverCode }) });
 };
 
 /**

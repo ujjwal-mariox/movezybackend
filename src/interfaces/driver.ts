@@ -45,6 +45,9 @@ export interface IDriverBankUpdateRequest {
 export interface IDriver {
   _id?: Types.ObjectId;
 
+  /** Short display ID ("DRV-0042") for admin search and support calls. */
+  driverCode?: string;
+
   mobileNumber: string;
   countryCode: string;
   userId?: Types.ObjectId;

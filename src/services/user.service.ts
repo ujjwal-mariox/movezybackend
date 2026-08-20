@@ -4,6 +4,7 @@ import User from "../models/Users";
 import helpers from "../utils/helpers";
 import redis from "../utils/redis";
 import { IUser } from "../interfaces/users";
+import { generateEntityCode } from "./entity-code.service";
 
 /**
  * Generate a unique referral code (8-char uppercase alphanumeric)
@@ -27,11 +28,23 @@ const generateUniqueReferralCode = async (): Promise<string> => {
 };
 
 /**
- * Create user — auto-generates a unique referral code
+ * Create user — auto-generates a unique referral code and the short display
+ * ID ("CUS-0042") admins search by. Code-allocation failure doesn't block
+ * signup; the boot backfill repairs any account left without one.
  */
 export const addUsers = async (data: Partial<IUser>) => {
   const referralCode = await generateUniqueReferralCode();
-  return await User.create({ ...data, referralCode });
+  let userCode: string | undefined;
+  try {
+    userCode = await generateEntityCode("user");
+  } catch (err) {
+    console.error("userCode allocation failed (backfill will repair):", err);
+  }
+  return await User.create({
+    ...data,
+    referralCode,
+    ...(userCode && { userCode }),
+  });
 };
 
 /**

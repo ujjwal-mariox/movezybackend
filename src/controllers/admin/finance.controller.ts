@@ -430,6 +430,28 @@ export const getCODSummary = async (req: Request, res: Response) => {
           },
           { $sort: { floatingCash: -1 } },
           { $limit: 20 },
+          // Who a balance belongs to, in words. The table used to render the
+          // raw ObjectId, which nobody can act on — the settle flow needs the
+          // admin to recognise the driver.
+          {
+            $lookup: {
+              from: "drivers",
+              localField: "_id",
+              foreignField: "_id",
+              pipeline: [
+                { $project: { fullName: 1, driverCode: 1, mobileNumber: 1 } },
+              ],
+              as: "driver",
+            },
+          },
+          {
+            $addFields: {
+              driverName: { $first: "$driver.fullName" },
+              driverCode: { $first: "$driver.driverCode" },
+              driverPhone: { $first: "$driver.mobileNumber" },
+            },
+          },
+          { $project: { driver: 0 } },
         ])
         .toArray(),
     ]);

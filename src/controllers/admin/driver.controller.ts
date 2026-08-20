@@ -125,6 +125,9 @@ export const getAllDrivers = async (req: Request, res: Response) => {
       { fullName: { $regex: search, $options: "i" } },
       { mobileNumber: { $regex: search, $options: "i" } },
       { email: { $regex: search, $options: "i" } },
+      // The short display ID ("DRV-0042") — with or without the prefix, so
+      // typing just "42" or "0042" also finds the driver.
+      { driverCode: { $regex: search, $options: "i" } },
     ];
   }
 

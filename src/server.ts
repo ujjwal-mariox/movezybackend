@@ -17,6 +17,7 @@ import { initializeFirebase } from "./services/notification.service";
 import { startDelayDetection } from "./services/delay-detection.service";
 import { startAutomationEngine } from "./services/automation-engine.service";
 import { startJobScheduler } from "./services/job-scheduler.service";
+import { backfillEntityCodes } from "./services/entity-code.service";
 import { startReportScheduler } from "./services/scheduled-report.service";
 import { startOnboardingReminders } from "./services/onboarding-reminder.service";
 import { startScheduledDispatch } from "./services/scheduled-dispatch.service";
@@ -268,6 +269,9 @@ const preflight = () => {
     startJobScheduler();
     startReportScheduler();
     startScheduledDispatch();
+    // Assign DRV-/CUS- display codes to any driver/customer missing one.
+    // Idempotent; new signups get theirs at creation.
+    void backfillEntityCodes();
   });
 })();
 

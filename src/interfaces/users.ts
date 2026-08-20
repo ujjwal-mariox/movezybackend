@@ -3,6 +3,8 @@ import { Document } from "mongoose";
 export type Gender = "Male" | "Female" | "Other";
 
 export interface IUser extends Document {
+  /** Short display ID ("CUS-0042") for admin search and support calls. */
+  userCode?: string;
   fullName: string;
   email: string;
   profileImage: string;

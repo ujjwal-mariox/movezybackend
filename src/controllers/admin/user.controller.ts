@@ -67,6 +67,9 @@ export const getAllUsers = async (req: Request, res: Response) => {
       { mobileNumber: { $regex: search, $options: "i" } },
       { email: { $regex: search, $options: "i" } },
       { referralCode: { $regex: search, $options: "i" } },
+      // The short display ID ("CUS-0042"), matched loosely so a bare number
+      // works too.
+      { userCode: { $regex: search, $options: "i" } },
     ];
   }
 
