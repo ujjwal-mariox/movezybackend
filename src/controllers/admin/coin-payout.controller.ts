@@ -1,6 +1,19 @@
 import { Request, Response } from "express";
 import { CoinPayout } from "../../models/coin-payout.model";
+import { AppConfig } from "../../models/app-config.model";
 import * as CoinService from "../../services/coin.service";
+
+/**
+ * Same switch as driver payouts (payout.controller.ts): the approver≠payer
+ * rule applies only when `payout_four_eyes_enabled` is true. With a single
+ * admin account the always-on rule made an approved payout unpayable.
+ */
+const isFourEyesEnabled = async (): Promise<boolean> => {
+  const doc: any = await AppConfig.findOne({
+    key: "payout_four_eyes_enabled",
+  }).lean();
+  return doc?.value === true || doc?.value === "true";
+};
 
 /**
  * Customer coin→bank payout queue.
@@ -85,9 +98,12 @@ export const markCoinPayoutPaid = async (req: Request, res: Response) => {
     });
   }
 
-  // Four eyes on money out, same rule as driver payouts: whoever approved the
-  // request cannot also be the one who records it as paid.
-  if (String(payout.approvedBy) === String(adminId(req))) {
+  // Four eyes on money out, same rule as driver payouts — enforced only when
+  // the switch is on.
+  if (
+    String(payout.approvedBy) === String(adminId(req)) &&
+    (await isFourEyesEnabled())
+  ) {
     return res.status(400).json({
       success: false,
       message:

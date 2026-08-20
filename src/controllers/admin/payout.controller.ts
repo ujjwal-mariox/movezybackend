@@ -2,8 +2,25 @@ import { Request, Response } from "express";
 import Payout from "../../models/payout.model";
 import Driver from "../../models/driver.model";
 import { Expense } from "../../models/expense.model";
+import { AppConfig } from "../../models/app-config.model";
 import { createAuditEntry } from "./audit-log.controller";
 import * as DriverPayoutService from "../../services/driver-payout.service";
+
+/**
+ * Four-eyes on money out: whether the requester/approver/payer must be
+ * different admins. OFF by default — the client currently operates with a
+ * single admin account, and with the rule always-on an admin-created payout
+ * could never be approved and an approved one could never be paid, so no
+ * payout could ever complete. Flip `payout_four_eyes_enabled` to true in
+ * System Configuration once there are enough admins to share the duty.
+ * Every step is audit-logged with the acting admin either way.
+ */
+const isFourEyesEnabled = async (): Promise<boolean> => {
+  const doc: any = await AppConfig.findOne({
+    key: "payout_four_eyes_enabled",
+  }).lean();
+  return doc?.value === true || doc?.value === "true";
+};
 
 // Acting admin identity off the request (set by admin-auth middleware).
 const actingAdmin = (req: Request) => {
@@ -140,6 +157,9 @@ export const listPayouts = async (req: Request, res: Response) => {
   res.locals.data = {
     payouts,
     pendingAmount: pendingAgg[0]?.total || 0,
+    // The UI hides Approve / Mark-paid on rows the acting admin isn't allowed
+    // to action — but only when the rule is actually on.
+    fourEyes: await isFourEyesEnabled(),
     pagination: {
       total,
       page: Number(page),
@@ -165,12 +185,11 @@ export const approvePayout = async (req: Request, res: Response) => {
     });
   }
 
-  // Four eyes on money out. Refunds already block self-approval
-  // (refund.controller: "You cannot approve your own refund request"); payouts
-  // did not, so one admin could raise a payout for any driver and approve it.
+  // Four eyes on money out — only when enabled (see isFourEyesEnabled).
   if (
     payout.requestedByType === "Admin" &&
-    String(payout.requestedBy) === String((req as any).adminId)
+    String(payout.requestedBy) === String((req as any).adminId) &&
+    (await isFourEyesEnabled())
   ) {
     return res.status(400).json({
       success: false,
@@ -216,8 +235,11 @@ export const markPayoutPaid = async (req: Request, res: Response) => {
     });
   }
 
-  // ...and the approver cannot also be the payer.
-  if (String(payout.approvedBy) === String((req as any).adminId)) {
+  // ...and the approver cannot also be the payer — only when four-eyes is on.
+  if (
+    String(payout.approvedBy) === String((req as any).adminId) &&
+    (await isFourEyesEnabled())
+  ) {
     return res.status(400).json({
       success: false,
       message:
