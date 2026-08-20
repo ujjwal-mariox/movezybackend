@@ -59,13 +59,22 @@ const BOOKING_HIGH_HINTS = ["driver", "late", "cancel", "delay", "pickup", "deli
 const derivePriority = (
   category: string,
   hasBooking: boolean,
+  subject?: string,
+  description?: string,
 ): ISupportTicket["priority"] => {
-  const c = (category || "").toLowerCase();
-  if (URGENT_HINTS.some((h) => c.includes(h))) return "URGENT";
-  if (HIGH_HINTS.some((h) => c.includes(h))) return "HIGH";
+  // Scan everything the client told us, not just the category label. The
+  // driver app's guided flow files escalations under generic categories
+  // ("Call Back") with the actual topic in the subject/description — matching
+  // on category alone sent every one of those to MEDIUM regardless of urgency.
+  const text = [category, subject, description]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  if (URGENT_HINTS.some((h) => text.includes(h))) return "URGENT";
+  if (HIGH_HINTS.some((h) => text.includes(h))) return "HIGH";
   // A trip-related complaint tied to an actual booking is time-sensitive in a
   // way the same category without a booking is not.
-  if (hasBooking && BOOKING_HIGH_HINTS.some((h) => c.includes(h))) return "HIGH";
+  if (hasBooking && BOOKING_HIGH_HINTS.some((h) => text.includes(h))) return "HIGH";
   return "MEDIUM";
 };
 
@@ -87,9 +96,11 @@ export const createTicket = async (data: {
   const type = data.type || inferTicketType(data);
   // Neither app sends a priority, so every ticket landed at the MEDIUM
   // default "regardless of urgency". When the caller doesn't specify one,
-  // derive it from what the category says and whether a live booking is
+  // derive it from everything the ticket says and whether a live booking is
   // attached. An explicit priority from a client still wins.
-  const priority = data.priority || derivePriority(data.category, !!data.bookingId);
+  const priority =
+    data.priority ||
+    derivePriority(data.category, !!data.bookingId, data.subject, data.description);
   const slaMinutes = data.slaMinutes ?? PRIORITY_SLA_MINUTES[priority] ?? 240;
   const slaDueAt = new Date(Date.now() + slaMinutes * 60 * 1000);
 
@@ -246,6 +257,32 @@ export const updateTicketStatus = async (
   return await SupportTicket.findOneAndUpdate({ ticketId }, update, {
     new: true,
   });
+};
+
+/**
+ * Change a ticket's priority (admin correction). The SLA clock is recomputed
+ * from the ticket's creation time at the new priority's allowance — a ticket
+ * bumped to URGENT should be judged against the URGENT deadline, not keep the
+ * lazy four-hour one it was born with.
+ */
+export const updateTicketPriority = async (
+  ticketId: string,
+  priority: ISupportTicket["priority"],
+) => {
+  if (!["LOW", "MEDIUM", "HIGH", "URGENT"].includes(priority)) return null;
+  const ticket = await SupportTicket.findOne({ ticketId });
+  if (!ticket) return null;
+
+  const slaMinutes = PRIORITY_SLA_MINUTES[priority] ?? 240;
+  // createdAt comes from timestamps:true and isn't on the interface.
+  const createdAt = (ticket as any).createdAt
+    ? new Date((ticket as any).createdAt)
+    : new Date();
+  ticket.priority = priority;
+  ticket.slaMinutes = slaMinutes;
+  ticket.slaDueAt = new Date(createdAt.getTime() + slaMinutes * 60 * 1000);
+  await ticket.save();
+  return ticket;
 };
 
 /**

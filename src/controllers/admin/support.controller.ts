@@ -125,6 +125,36 @@ export const updateTicketStatus = async (req: Request, res: Response) => {
 };
 
 /**
+ * Correct a ticket's priority. The auto-derived priority is a guess from the
+ * ticket text; the human reading it knows better.
+ */
+export const updateTicketPriority = async (req: Request, res: Response) => {
+  const { ticketId } = req.params;
+  const { priority } = req.body;
+
+  if (!["LOW", "MEDIUM", "HIGH", "URGENT"].includes(priority)) {
+    return res.status(400).json({
+      success: false,
+      message: "priority must be LOW, MEDIUM, HIGH or URGENT",
+    });
+  }
+
+  const ticket = await SupportService.updateTicketPriority(ticketId, priority);
+
+  if (!ticket) {
+    return res.status(404).json({
+      success: false,
+      message: "Ticket not found",
+    });
+  }
+
+  res.locals.data = {
+    message: "Ticket priority updated",
+    ticket,
+  };
+};
+
+/**
  * Escalate ticket
  */
 export const escalateTicket = async (req: Request, res: Response) => {

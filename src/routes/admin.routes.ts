@@ -1005,6 +1005,15 @@ adminRouter.put(
   ResponseMiddleware,
 );
 
+// Correct a ticket's priority (recomputes the SLA clock at the new level).
+adminRouter.put(
+  "/support/tickets/:ticketId/priority",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SUPPORT_RESOLVE),
+  ErrorHandlerMiddleware(SupportController.updateTicketPriority),
+  ResponseMiddleware,
+);
+
 adminRouter.post(
   "/support/tickets/:ticketId/reply",
   verifyAdminToken,
