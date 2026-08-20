@@ -302,6 +302,21 @@ adminRouter.get(
   ResponseMiddleware,
 );
 
+// Queue of vehicles awaiting approval (approved drivers' added vehicles
+// included — the driver-level pending count misses those entirely).
+//
+// MUST stay above "/drivers/:id": Express matches in registration order, so
+// while this sat further down, GET /drivers/pending-vehicles was captured by
+// :id, and the handler rejected "pending-vehicles" as an invalid ObjectId —
+// the queue answered 400 on every dashboard load.
+adminRouter.get(
+  "/drivers/pending-vehicles",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.DRIVERS_VIEW),
+  ErrorHandlerMiddleware(DriverController.listPendingVehicles),
+  ResponseMiddleware,
+);
+
 adminRouter.get(
   "/drivers/:id",
   verifyAdminToken,
@@ -391,18 +406,6 @@ adminRouter.put(
   verifyAdminToken,
   requirePermission(PERMISSIONS.DRIVERS_UPDATE),
   ErrorHandlerMiddleware(DriverController.decideBankUpdateRequest),
-  ResponseMiddleware,
-);
-
-// Queue of vehicles awaiting approval (approved drivers' added vehicles
-// included — the driver-level pending count misses those entirely).
-// Registered before /drivers/:id/vehicles so "pending-vehicles" is not
-// captured as an :id.
-adminRouter.get(
-  "/drivers/pending-vehicles",
-  verifyAdminToken,
-  requirePermission(PERMISSIONS.DRIVERS_VIEW),
-  ErrorHandlerMiddleware(DriverController.listPendingVehicles),
   ResponseMiddleware,
 );
 
