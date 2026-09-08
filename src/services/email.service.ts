@@ -9,6 +9,20 @@
  * isEmailConfigured() lets callers gate behaviour honestly.
  */
 import config from "../config";
+import nodemailer from "nodemailer";
+
+let transport: nodemailer.Transporter | null = null;
+const getTransport = (): nodemailer.Transporter => {
+  if (!transport) {
+    transport = nodemailer.createTransport({
+      host: config.email.host,
+      port: config.email.port,
+      secure: config.email.port === 465,
+      auth: { user: config.email.user, pass: config.email.password },
+    });
+  }
+  return transport;
+};
 
 export const isEmailConfigured = (): boolean =>
   Boolean(config.email.host && config.email.user && config.email.password);
@@ -39,14 +53,16 @@ export const sendEmail = async (input: EmailInput): Promise<boolean> => {
   }
 
   try {
-    // Real SMTP transport goes here once nodemailer is installed & SMTP_* set.
-    // Kept as a no-op-with-honest-return so the app builds without the dep.
-    console.warn(
-      "[email] SMTP is configured but no transport is wired yet — install nodemailer and implement deliver().",
-    );
-    return false;
+    const info = await getTransport().sendMail({
+      from: config.email.from,
+      to: input.to,
+      subject: input.subject,
+      text: input.text,
+      html: input.html,
+    });
+    return Boolean(info?.messageId || (info?.accepted && info.accepted.length > 0));
   } catch (err) {
-    console.error("[email] send failed:", err);
+    console.error("[email] send failed:", (err as Error)?.message || err);
     return false;
   }
 };

@@ -98,6 +98,16 @@ router.get(
   ResponseMiddleware,
 );
 
+// Website contact form — public, rate-limited per IP.
+import { submitContact } from "../controllers/contact.controller";
+import { rateLimit } from "../middlewares/rate-limit.middleware";
+router.post(
+  "/contact",
+  rateLimit({ windowSeconds: 600, maxRequests: 5, keyPrefix: "rl:contact", message: "Too many messages — please try again in a few minutes." }),
+  ErrorHandlerMiddleware(submitContact),
+  ResponseMiddleware,
+);
+
 // Road routing for the maps in both apps. Open (same trust level as the OSM
 // tiles the apps already fetch) and cached server-side; returns null-ish 404
 // so callers fall back to a straight line rather than breaking the screen.
