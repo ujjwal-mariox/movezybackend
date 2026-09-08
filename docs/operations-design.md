@@ -99,3 +99,14 @@ in the workflow. The split is stored on the booking (`taxBreakdown`), refreshed
 whenever the fare changes (added stop, waiting charge), copied to the invoice,
 printed on the PDF with the place of supply, and shown on the admin order
 detail.
+
+## 6. Weather surge (region-based, admin-switched)
+
+Commission & Charges → Weather surge holds named rows ("Rain — Mumbai"):
+the cities covered (none = everywhere), a multiplier, an ON/OFF switch and an
+optional auto-off time (1–24 h) so a surge cannot be forgotten. While ON, it
+applies to new quotes whose pickup city matches and whose pickup is within
+the next hour (a booking scheduled for tomorrow is not priced on today's
+rain). Where a weather surge overlaps a peak or night window the highest
+single multiplier applies — nothing compounds. The old single "rain surge
+multiplier" was stored but never applied anywhere; it is no longer used.
