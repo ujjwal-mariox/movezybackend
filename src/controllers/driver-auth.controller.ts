@@ -12,6 +12,7 @@ import * as DriverKycService from "../services/driver-kyc.service";
 import * as DriverVehicleService from "../services/driver-vehicle.service";
 import * as SmsService from "../services/sms.service";
 import VehicleModel from "../models/vehicle.model";
+import * as VehicleLifecycle from "../services/vehicle-lifecycle.service";
 import VehicleType from "../models/vehicle-type.model";
 import DriverVehicleModel from "../models/driver-vehicle.model";
 import helpers from "../utils/helpers";
@@ -674,87 +675,110 @@ export const uploadRC = async (
       },
     );
 
-    // Also create a Vehicle record for multi-vehicle support
+    // ── Vehicle record ──
     const vehicleTypeMap: Record<string, string> = {
       "2 Wheeler": "2W", "3 Wheeler": "3W", "4 Wheeler": "4W",
       "2W": "2W", "3W": "3W", "4W": "4W",
     };
     const rawType = req.body.vehicalId || "4W";
 
-    // Distinguish onboarding (first vehicle, driver not yet approved) from an
-    // approved driver adding another vehicle. The added vehicle must go
-    // through its own admin review, so it must not enter dispatch yet.
-    const driverDoc = await DriverService.getDriverById(driverId);
-    const driverAlreadyApproved = driverDoc?.status === "approved";
-    const existingVehicles = await VehicleModel.countDocuments({
-      driverId: new Types.ObjectId(driverId),
-      isDeleted: { $ne: true },
-    });
-
-    const vehicleData: any = {
-      driverId: new Types.ObjectId(driverId),
-      vehicleNumber: req.body.vehicleNumber,
-      vehicleType: vehicleTypeMap[rawType] || "4W",
-      rcFrontImage: rcFrontUrl,
-      rcBackImage: rcBackUrl,
-      // Only the first vehicle is primary. Every vehicle used to be created
-      // with isPrimary:true, so the admin panel showed them all as "(Primary)".
-      isPrimary: existingVehicles === 0,
-      isActive: true,
-    };
-    if (req.body.bodyType) vehicleData.vehicleBodyType = req.body.bodyType;
-    if (req.body.fuelType) vehicleData.fuelType = req.body.fuelType;
-    if (req.body.city) vehicleData.city = req.body.city;
-
-    const vehicle = await new VehicleModel(vehicleData).save();
-
-    // Tie the vehicle to the admin catalog so dispatch can match it. Dispatch
-    // filters candidates via DriverVehicle.vehicleTypeId (findNearbyDrivers
-    // hard-skips drivers without a matching row); the legacy VehicleModel row
-    // above only stores a coarse "2W/3W/4W" string that dispatch never reads.
-    // Optional for backward compat with app builds that don't send it yet.
+    // The catalog type dispatch matches on. Optional for old app builds.
+    let catalogType: any = null;
     const rawVehicleTypeId = req.body.vehicleTypeId;
     if (rawVehicleTypeId && Types.ObjectId.isValid(rawVehicleTypeId)) {
-      const catalogType = await VehicleType.findOne({
+      catalogType = await VehicleType.findOne({
         _id: rawVehicleTypeId,
         isActive: true,
         isDeleted: false,
-      }).select("_id");
+      }).select("_id categoryCode");
+    }
 
-      if (catalogType) {
-        // Record the catalog type on the vehicle itself as well. It used to be
-        // used here and then thrown away, so the Vehicle row only remembered
-        // "2W"/"3W" — which meant nothing downstream (admin approval included)
-        // could ever rebuild the dispatch link if it went missing.
-        vehicle.vehicleTypeId = catalogType._id as Types.ObjectId;
-        await vehicle.save();
+    // Attribute rules: canonical fuel label (fixes "Electric" failing the old
+    // EV-only enum) and the two-wheeler Scooter/Bike + Petrol/Electric rule.
+    const fuelType = VehicleLifecycle.normalizeFuelType(req.body.fuelType);
+    if (req.body.fuelType && !fuelType) {
+      req.rCode = 0;
+      req.msg = "invalid_fuel_type";
+      return next();
+    }
+    const bodyType = VehicleLifecycle.normalizeBodyType(req.body.bodyType);
+    const categoryCode = catalogType?.categoryCode || vehicleTypeMap[rawType];
+    const attrError = VehicleLifecycle.validateVehicleAttributes(
+      categoryCode,
+      bodyType,
+      fuelType,
+    );
+    if (attrError) {
+      req.rCode = 0;
+      req.msg = attrError;
+      return next();
+    }
 
-        // Upsert keyed by registration number (unique, stored uppercase) so a
-        // re-submitted RC updates rather than violating the unique index.
-        await DriverVehicleModel.findOneAndUpdate(
-          { registrationNumber: String(req.body.vehicleNumber).toUpperCase() },
-          {
-            $set: {
-              driverId: new Types.ObjectId(driverId),
-              vehicleTypeId: catalogType._id,
-              // During onboarding the driver is not approved, so dispatch
-              // can't pick them regardless and driver-level approval will
-              // activate this row. But when an APPROVED driver adds a vehicle,
-              // an active row here made the unverified vehicle dispatchable
-              // the moment its RC was uploaded — before payment, before any
-              // review. It now stays inactive until the admin approves this
-              // specific vehicle.
-              isActive: !driverAlreadyApproved,
-              isDeleted: false,
-            },
-          },
-          { upsert: true, new: true },
-        );
-      }
+    // Duplicate registration. A number held by ANOTHER partner is refused
+    // outright (this path used to accept it, and then re-pointed the dispatch
+    // row at the newcomer — partner B could take over partner A's vehicle).
+    // The same partner re-submitting their own number updates in place: that
+    // is the "duplicate entries when fuel type is changed" report.
+    const conflict = await VehicleLifecycle.findVehicleConflict(
+      req.body.vehicleNumber,
+      driverId,
+    );
+    if (conflict.other) {
+      req.rCode = 0;
+      req.msg = "vehicle_registered_to_another_partner";
+      return next();
+    }
+
+    const parseDate = (v: unknown): Date | undefined => {
+      if (v === undefined || v === null || v === "") return undefined;
+      const d = new Date(String(v));
+      return Number.isNaN(d.getTime()) ? undefined : d;
+    };
+    const expiry = {
+      rcExpiryDate: parseDate(req.body.rcExpiryDate),
+      insuranceExpiryDate: parseDate(req.body.insuranceExpiryDate),
+      pucExpiryDate: parseDate(req.body.pucExpiryDate),
+    };
+
+    let vehicle: any;
+    if (conflict.own) {
+      vehicle = await VehicleModel.findById(conflict.own._id);
+      vehicle.rcFrontImage = rcFrontUrl;
+      if (rcBackUrl) vehicle.rcBackImage = rcBackUrl;
+      vehicle.vehicleType = vehicleTypeMap[rawType] || vehicle.vehicleType || "4W";
+      if (bodyType) vehicle.vehicleBodyType = bodyType;
+      if (fuelType) vehicle.fuelType = fuelType;
+      if (req.body.city) vehicle.city = req.body.city;
+      if (catalogType) vehicle.vehicleTypeId = catalogType._id;
+      for (const [k, v] of Object.entries(expiry)) if (v) (vehicle as any)[k] = v;
+      await vehicle.save();
     } else {
-      // No catalog type = this vehicle can never be matched to a booking. It
-      // is accepted (older app builds don't send one) but it will sit approved
-      // and never ring, so make that visible instead of silent.
+      const existingVehicles = await VehicleModel.countDocuments({
+        driverId: new Types.ObjectId(driverId),
+        isDeleted: { $ne: true },
+      });
+      const vehicleData: any = {
+        driverId: new Types.ObjectId(driverId),
+        vehicleNumber: req.body.vehicleNumber,
+        vehicleType: vehicleTypeMap[rawType] || "4W",
+        rcFrontImage: rcFrontUrl,
+        rcBackImage: rcBackUrl,
+        // Only the first vehicle is the selected one; later additions stay
+        // idle until the partner switches to them.
+        isPrimary: existingVehicles === 0,
+        isActive: true,
+        ...expiry,
+      };
+      if (bodyType) vehicleData.vehicleBodyType = bodyType;
+      if (fuelType) vehicleData.fuelType = fuelType;
+      if (req.body.city) vehicleData.city = req.body.city;
+      if (catalogType) vehicleData.vehicleTypeId = catalogType._id;
+      vehicle = await new VehicleModel(vehicleData).save();
+    }
+
+    // Dispatch row derived from one rule (approved ∧ selected ∧ not blocked).
+    await VehicleLifecycle.syncDispatchRow(vehicle);
+    if (!vehicle.vehicleTypeId) {
       console.warn(
         `[kyc/rc] vehicle ${req.body.vehicleNumber} registered without a vehicleTypeId — it will NOT be dispatchable until one is set`,
       );

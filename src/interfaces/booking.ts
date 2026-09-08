@@ -41,6 +41,8 @@ export interface ILocation {
   address: string;
   lat: number;
   lng: number;
+  /** Pickup city, when the app captured it (drives city-specific rates). */
+  city?: string;
   contactName?: string;
   contactPhone?: string;
   floor?: number;
@@ -68,6 +70,8 @@ export interface IBooking {
   bookingNumber?: string;
   userId: Types.ObjectId;
   driverId?: Types.ObjectId;
+  /** The partner's specific vehicle on this trip (see booking.model). */
+  vehicleId?: Types.ObjectId;
   enterpriseId?: Types.ObjectId;
   vehicleTypeId: Types.ObjectId;
 

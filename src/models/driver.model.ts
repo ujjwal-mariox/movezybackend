@@ -84,6 +84,18 @@ const DriverSchema = new Schema<IDriver>(
 
     rejectionReason: String,
     suspensionReason: String,
+    // Set by the document-expiry job when the driving licence lapses; clears
+    // when the admin records a renewed date. While blocked the driver is
+    // forced offline and none of their vehicles are dispatchable.
+    documentBlock: {
+      blocked: { type: Boolean, default: false },
+      reasons: [String],
+      blockedAt: Date,
+    },
+    licenceExpiryReminders: {
+      expiryDate: Date,
+      daysSent: [Number],
+    },
 
     isActive: {
       type: Boolean,

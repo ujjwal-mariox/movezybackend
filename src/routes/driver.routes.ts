@@ -292,6 +292,13 @@ driverRouter.post(
   ResponseMiddleware,
 );
 
+// Switch the active vehicle (one at a time; dispatch + history follow it)
+driverRouter.post(
+  "/my-vehicles/:vehicleId/activate",
+  ErrorHandlerMiddleware(DriverController.activateMyVehicle),
+  ResponseMiddleware,
+);
+
 // =====================
 // VEHICLES (Legacy)
 // =====================

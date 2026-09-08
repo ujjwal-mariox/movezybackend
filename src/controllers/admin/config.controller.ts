@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import * as FareService from "../../services/fare.service";
 import {
   FareConfig,
   AppConfig,
@@ -42,7 +43,12 @@ function coerceVehicleTypeFields(data: Record<string, any>) {
     "maxRangeKm",
     "sortOrder",
     "avgSpeedKmph",
+    "lengthFt",
+    "breadthFt",
+    "heightFt",
   ];
+  // Optional per-vehicle figures: "" / "null" mean "inherit the global value".
+  const nullableNumFields = ["minimumFare", "freeWaitingMinutes", "commissionPercent"];
   for (const key of boolFields) {
     if (key in data && typeof data[key] === "string") {
       data[key] = data[key] === "true";
@@ -52,6 +58,42 @@ function coerceVehicleTypeFields(data: Record<string, any>) {
     if (key in data && typeof data[key] === "string") {
       data[key] = Number(data[key]);
     }
+  }
+  for (const key of nullableNumFields) {
+    if (!(key in data)) continue;
+    const v = data[key];
+    if (v === "" || v === null || v === "null" || v === undefined) data[key] = null;
+    else if (typeof v === "string") data[key] = Number.isFinite(Number(v)) ? Number(v) : null;
+  }
+  // City rate cards arrive as JSON text on multipart (image upload) requests.
+  if (typeof data.cityOverrides === "string") {
+    try {
+      data.cityOverrides = JSON.parse(data.cityOverrides);
+    } catch {
+      data.cityOverrides = [];
+    }
+  }
+  if (Array.isArray(data.cityOverrides)) {
+    const optNum = (v: unknown) =>
+      v === "" || v === null || v === undefined ? null : Number.isFinite(Number(v)) ? Number(v) : null;
+    data.cityOverrides = data.cityOverrides
+      .map((row: any) => ({
+        cities: (Array.isArray(row?.cities) ? row.cities : String(row?.cities || "").split(","))
+          .map((c: any) => String(c).trim())
+          .filter(Boolean),
+        baseFare: optNum(row?.baseFare),
+        perKmRate: optNum(row?.perKmRate),
+        perMinuteRate: optNum(row?.perMinuteRate),
+        minimumFare: optNum(row?.minimumFare),
+        freeWaitingMinutes: optNum(row?.freeWaitingMinutes),
+        commissionPercent: optNum(row?.commissionPercent),
+        isActive: row?.isActive === undefined ? true : row.isActive !== false && row.isActive !== "false",
+      }))
+      // A row naming no city can never match anything.
+      .filter((row: any) => row.cities.length > 0);
+  }
+  if (typeof data.loadTypes === "string") {
+    try { data.loadTypes = JSON.parse(data.loadTypes); } catch { /* keep */ }
   }
   return data;
 }
@@ -73,14 +115,40 @@ export const getFareConfig = async (req: Request, res: Response) => {
     });
   }
 
-  res.locals.data = { config };
+  // The windows the fare engine will actually use (legacy single-window
+  // configs are read through the same helper), so the page can show them.
+  res.locals.data = { config, surge: FareService.surgeWindowsFor(config) };
 };
 
 /**
  * Update fare configuration
  */
+/** Validate surge window rows: hours 0–23, multiplier ≥ 1; drop what fails. */
+const cleanSurgeWindows = (rows: unknown): any[] | undefined => {
+  if (rows === undefined) return undefined;
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .map((w: any) => ({
+      label: String(w?.label || "").trim(),
+      startHour: Number(w?.startHour),
+      endHour: Number(w?.endHour),
+      multiplier: Number(w?.multiplier),
+    }))
+    .filter(
+      (w) =>
+        Number.isInteger(w.startHour) && w.startHour >= 0 && w.startHour <= 23 &&
+        Number.isInteger(w.endHour) && w.endHour >= 0 && w.endHour <= 23 &&
+        Number.isFinite(w.multiplier) && w.multiplier >= 1 &&
+        w.startHour !== w.endHour,
+    );
+};
+
 export const updateFareConfig = async (req: Request, res: Response) => {
-  const updateData = req.body;
+  const updateData = { ...req.body };
+  const peak = cleanSurgeWindows(updateData.peakWindows);
+  const night = cleanSurgeWindows(updateData.nightWindows);
+  if (peak !== undefined) updateData.peakWindows = peak;
+  if (night !== undefined) updateData.nightWindows = night;
 
   // Read the live config BEFORE writing, so the audit row can carry the value
   // that was replaced. Changing driver commission or GST left no record at all
@@ -1370,7 +1438,8 @@ export const getAllMasterData = async (_req: Request, res: Response) => {
     // vehicleTypeId dispatch matches on, so the app must submit it (not a name).
     VehicleType.find({ isActive: true, isDeleted: false })
       .sort({ sortOrder: 1, name: 1 })
-      .select("name icon image"),
+      // categoryCode lets the app switch a 2W to Scooter/Bike + Petrol/Electric.
+      .select("name icon image categoryCode"),
   ]);
 
   res.locals.data = { cities, bodyTypes, fuelTypes, vehicleTypes };

@@ -26,6 +26,7 @@ import UserGST from "../models/user-gst.model";
 import { cache } from "../utils/redis.util";
 import { getDistanceForLegs } from "../services/routing.service";
 import { generateBookingNumber } from "../services/booking-number.service";
+import { resolveBookingCity } from "../services/vehicle-rate.service";
 import { Types } from "mongoose";
 
 /** Guards against a client declaring a 10,000-floor building. */
@@ -194,12 +195,16 @@ export const getFareEstimate = async (req: Request, res: Response) => {
       resolveGoodsWeight(goodsWeight)
     );
 
+    // City-specific rate card, if one is configured for the pickup city.
+    const estimateCity = await resolveBookingCity(pickup);
+
     // Calculate fare
     const fareBreakdown = await FareService.calculateFare({
       vehicleTypeId,
       distanceKm,
       durationMin,
       serviceType: serviceType || "WITHIN_CITY",
+      city: estimateCity,
       addons: resolvedAddons,
       // Loading/unloading is priced through the add-ons above. It is never
       // taken from the request — see the note on the destructure.
@@ -291,6 +296,7 @@ export const createBooking = async (req: Request, res: Response) => {
     const {
       pickupLocation,
       pickupAddress,
+      pickupCity,
       dropLocation,
       dropAddress,
       distanceKm,
@@ -419,12 +425,20 @@ export const createBooking = async (req: Request, res: Response) => {
       resolveGoodsWeight(goodsWeight)
     );
 
+    // Same city resolution as the estimate, so the booking is priced on the
+    // card the customer was quoted from.
+    const bookingCity = await resolveBookingCity({
+      ...(pickupLocation || {}),
+      city: pickupCity || pickupLocation?.city,
+    });
+
     // Calculate fare
     const fareBreakdown = await FareService.calculateFare({
       vehicleTypeId,
       distanceKm: bookingDistanceKm,
       durationMin: bookingDurationMin,
       serviceType: serviceType || "WITHIN_CITY",
+      city: bookingCity,
       addons: resolvedAddons,
       // Was `loadingUnloading?.loadingCharge + loadingUnloading?.unloadingCharge`
       // — a price straight from the request body. Loading/unloading is priced
@@ -604,6 +618,7 @@ export const createBooking = async (req: Request, res: Response) => {
         address: safePickupAddress,
         lat: pickupLocation.lat,
         lng: pickupLocation.lng,
+        ...(bookingCity ? { city: bookingCity } : {}),
       },
       drop: {
         address: safeDropAddress,
@@ -1895,6 +1910,9 @@ export const getVehicleOptions = async (req: Request, res: Response) => {
       `[VehicleOptions] Total active: ${(vehicleTypes as any[]).length}, After filter: ${filteredVehicleTypes.length}, goodsTypeId: ${goodsTypeId || "none"}`
     );
 
+    // City-specific rate cards apply per vehicle type; resolved once here.
+    const optionsCity = await resolveBookingCity(pickup);
+
     // Calculate fare for each vehicle type + recommendation score
     const options = await Promise.all(
       filteredVehicleTypes.map(async (type: any) => {
@@ -1903,6 +1921,7 @@ export const getVehicleOptions = async (req: Request, res: Response) => {
           distanceKm,
           durationMin,
           serviceType: serviceType || "WITHIN_CITY",
+          city: optionsCity,
           // Was hardcoded to 0, so every price on Select Vehicle excluded the
           // per-stop charge the customer would actually be billed.
           stops: Array.isArray(stops) ? stops.length : 0,

@@ -11,6 +11,8 @@ import * as ContentController from "../controllers/admin/content.controller";
 import * as FaqController from "../controllers/admin/faq.controller";
 import * as SupportController from "../controllers/admin/support.controller";
 import * as ReportsController from "../controllers/admin/reports.controller";
+import * as ExportController from "../controllers/admin/export.controller";
+import * as ComplianceController from "../controllers/admin/compliance.controller";
 import * as ScheduledReportController from "../controllers/admin/scheduled-report.controller";
 import * as PayoutController from "../controllers/admin/payout.controller";
 import * as CoinPayoutController from "../controllers/admin/coin-payout.controller";
@@ -1076,6 +1078,53 @@ adminRouter.post(
   verifyAdminToken,
   requirePermission(PERMISSIONS.SUPPORT_RESPOND),
   ErrorHandlerMiddleware(SupportController.useQuickReply),
+  ResponseMiddleware,
+);
+
+// ============ EXPORTS (Excel / PDF, server-generated) ============
+adminRouter.get(
+  "/exports",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.REPORTS_VIEW),
+  ErrorHandlerMiddleware(ExportController.listExportDatasets),
+  ResponseMiddleware,
+);
+// Streams a file, so no ResponseMiddleware. Money datasets need finance:export;
+// the controller checks the dataset's scope against the second permission.
+adminRouter.get(
+  "/exports/:dataset",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.REPORTS_EXPORT),
+  ErrorHandlerMiddleware(ExportController.downloadExport),
+);
+
+// ============ COMPLIANCE (document expiry) ============
+adminRouter.get(
+  "/compliance/expiry",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.DRIVERS_VIEW),
+  ErrorHandlerMiddleware(ComplianceController.expirySummary),
+  ResponseMiddleware,
+);
+adminRouter.post(
+  "/compliance/expiry/run",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.DRIVERS_VERIFY),
+  ErrorHandlerMiddleware(ComplianceController.runExpiryNow),
+  ResponseMiddleware,
+);
+adminRouter.put(
+  "/drivers/:id/vehicles/:vehicleId/documents",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.DRIVERS_VERIFY),
+  ErrorHandlerMiddleware(ComplianceController.updateVehicleDocuments),
+  ResponseMiddleware,
+);
+adminRouter.put(
+  "/drivers/:id/licence-expiry",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.DRIVERS_VERIFY),
+  ErrorHandlerMiddleware(ComplianceController.updateDriverLicenceExpiry),
   ResponseMiddleware,
 );
 

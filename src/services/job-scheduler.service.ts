@@ -1,4 +1,5 @@
 import { AppConfig } from "../models/app-config.model";
+import { runDocumentExpiryJob } from "./document-expiry.service";
 import Driver from "../models/driver.model";
 import Payout from "../models/payout.model";
 import DispatchOffer from "../models/dispatch-offer.model";
@@ -191,6 +192,14 @@ const runDueJobs = async (): Promise<void> => {
       run: autoAssign,
     },
     { key: "auto-payouts", cadenceMs: 24 * 60 * 60 * 1000, run: autoPayouts },
+    // Licence / RC / insurance / PUC reminders and expiry enforcement.
+    {
+      key: "document-expiry",
+      cadenceMs: 24 * 60 * 60 * 1000,
+      run: async () => {
+        await runDocumentExpiryJob();
+      },
+    },
   ];
 
   for (const job of jobs) {

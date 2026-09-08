@@ -7,6 +7,10 @@ const LocationSchema = new Schema(
     address: { type: String, required: true },
     lat: { type: Number, required: true, min: -90, max: 90 },
     lng: { type: Number, required: true, min: -180, max: 180 },
+    // Pickup city as the app's geocoder named it — the key city-specific
+    // pricing resolves on. Optional: older builds don't send it and the server
+    // reverse-geocodes when a city rate card exists.
+    city: String,
     contactName: String,
     contactPhone: String,
     floor: Number,
@@ -49,6 +53,14 @@ const BookingSchema = new Schema<IBooking>(
     driverId: {
       type: Schema.Types.ObjectId,
       ref: "Driver",
+      index: true,
+    },
+    // WHICH of the driver's vehicles ran this trip. Only the vehicle TYPE was
+    // recorded before, so a partner with two vehicles could never see history
+    // or earnings per vehicle. Stamped at assignment; backfilled for old rows.
+    vehicleId: {
+      type: Schema.Types.ObjectId,
+      ref: "Vehicle",
       index: true,
     },
     enterpriseId: {

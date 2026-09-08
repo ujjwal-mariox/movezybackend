@@ -1,4 +1,5 @@
 import { Types } from "mongoose";
+import { stampVehicleOnBooking } from "./vehicle-lifecycle.service";
 import Booking from "../models/booking.model";
 import Driver from "../models/driver.model";
 import * as bookingDispatchService from "./booking-dispatch.service";
@@ -30,6 +31,11 @@ const assignBookingToDriver = async (booking: any, driver: any) => {
   booking.status = "ASSIGNED";
   booking.assignedAt = new Date();
   await booking.save();
+  try {
+    await stampVehicleOnBooking(booking._id, driver._id);
+  } catch (e) {
+    console.error("[auto-assign] vehicle stamp failed (non-fatal)", e);
+  }
 
   driver.currentBookingId = booking._id;
   await driver.save();

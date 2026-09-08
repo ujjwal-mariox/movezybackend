@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { stampVehicleOnBooking } from "../../services/vehicle-lifecycle.service";
 import Booking from "../../models/booking.model";
 import User from "../../models/Users";
 import Driver from "../../models/driver.model";
@@ -463,6 +464,11 @@ export const assignDriver = async (req: Request, res: Response) => {
   booking.status = "ASSIGNED";
   booking.assignedAt = new Date();
   await booking.save();
+  try {
+    await stampVehicleOnBooking(booking._id as any, driverId);
+  } catch (e) {
+    console.error("[admin-assign] vehicle stamp failed (non-fatal)", e);
+  }
 
   // Update driver status
   driver.currentBookingId = booking._id as Types.ObjectId;

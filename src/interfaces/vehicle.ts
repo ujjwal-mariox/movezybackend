@@ -15,12 +15,19 @@ export interface IVehicle {
    */
   vehicleTypeId?: Types.ObjectId;
   vehicleBodyType?: string;
-  fuelType?: "Petrol" | "Diesel" | "CNG" | "EV";
+  fuelType?: "Petrol" | "Diesel" | "CNG" | "Electric";
 
   rcFrontImage?: string;
   rcBackImage?: string;
   vehicleImages?: string[];
   city?: string;
+
+  // Document validity + expiry enforcement (see document-expiry.service)
+  rcExpiryDate?: Date;
+  insuranceExpiryDate?: Date;
+  pucExpiryDate?: Date;
+  dispatchBlock?: { blocked: boolean; reasons: string[]; blockedAt?: Date };
+  expiryReminders?: { doc: string; expiryDate: Date; daysSent: number[] }[];
 
   // Assigned driver info (who physically drives this vehicle)
   assignedDriverName?: string;

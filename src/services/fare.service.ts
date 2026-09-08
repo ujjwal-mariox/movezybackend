@@ -1,6 +1,7 @@
 import { FareConfig } from "../models/app-config.model";
 import VehicleType from "../models/vehicle-type.model";
 import { Types } from "mongoose";
+import { resolveRates, type EffectiveRates } from "./vehicle-rate.service";
 
 export interface FareBreakdown {
   baseFare: number;
@@ -36,6 +37,11 @@ export interface FareBreakdown {
   // about, because these values were never returned.
   freeWaitingMinutes: number;
   waitingChargePerMin: number;
+  /** Which rate card priced this quote — "CITY" when a city override matched. */
+  rateSource?: "DEFAULT" | "CITY";
+  rateCity?: string;
+  /** The label of the surge window that applied, if any (for the receipt). */
+  surgeLabel?: string;
 }
 
 export interface FareCalculationInput {
@@ -45,6 +51,11 @@ export interface FareCalculationInput {
   isScheduled?: boolean;
   scheduledTime?: Date;
   serviceType?: "WITHIN_CITY" | "OUTSTATION";
+  /**
+   * Pickup city (as resolved by vehicle-rate.service.resolveBookingCity).
+   * Selects the city rate card; null/undefined prices on the Default card.
+   */
+  city?: string | null;
   addons?: {
     addonId: Types.ObjectId;
     price: number;
@@ -61,31 +72,93 @@ export interface FareCalculationInput {
   stops?: number; // Number of additional stops
 }
 
+// ── Surge windows ───────────────────────────────────────────────────────────
+
+export interface SurgeWindow {
+  label?: string;
+  startHour: number;
+  endHour: number;
+  multiplier: number;
+}
+
+/** Inclusive start, exclusive end; wraps midnight when start > end (22 → 6). */
+const hourInWindow = (hour: number, w: SurgeWindow): boolean =>
+  w.startHour <= w.endHour
+    ? hour >= w.startHour && hour < w.endHour
+    : hour >= w.startHour || hour < w.endHour;
+
 /**
- * Get current surge multiplier based on time and conditions
+ * The peak and night windows in force. Multi-row windows replaced the single
+ * start/end/multiplier trio; a config that predates the arrays is read
+ * through its legacy fields so nothing changes until the admin edits it.
  */
-const getSurgeMultiplier = async (scheduledTime?: Date): Promise<number> => {
-  const fareConfig = await FareConfig.findOne({ isActive: true });
-  if (!fareConfig) return 1;
+export const surgeWindowsFor = (
+  fareConfig: any,
+): { peak: SurgeWindow[]; night: SurgeWindow[] } => {
+  const clean = (rows: any[]): SurgeWindow[] =>
+    (Array.isArray(rows) ? rows : [])
+      .filter(
+        (w) =>
+          w &&
+          Number.isFinite(Number(w.startHour)) &&
+          Number.isFinite(Number(w.endHour)) &&
+          Number(w.multiplier) > 1,
+      )
+      .map((w) => ({
+        label: w.label,
+        startHour: Number(w.startHour),
+        endHour: Number(w.endHour),
+        multiplier: Number(w.multiplier),
+      }));
 
-  const now = scheduledTime || new Date();
-  const hour = now.getHours();
+  let peak = clean(fareConfig?.peakWindows);
+  let night = clean(fareConfig?.nightWindows);
 
-  // Night surge
-  if (
-    hour >= fareConfig.nightSurgeStartHour ||
-    hour < fareConfig.nightSurgeEndHour
-  ) {
-    return fareConfig.nightSurgeMultiplier;
+  if (!peak.length && Number(fareConfig?.peakHourSurgeMultiplier) > 1) {
+    peak = [
+      {
+        label: "Peak",
+        startHour: Number(fareConfig.peakHourStart ?? 8),
+        endHour: Number(fareConfig.peakHourEnd ?? 10),
+        multiplier: Number(fareConfig.peakHourSurgeMultiplier),
+      },
+    ];
   }
-
-  // Peak hour surge
-  if (hour >= fareConfig.peakHourStart && hour < fareConfig.peakHourEnd) {
-    return fareConfig.peakHourSurgeMultiplier;
+  if (!night.length && Number(fareConfig?.nightSurgeMultiplier) > 1) {
+    night = [
+      {
+        label: "Night",
+        startHour: Number(fareConfig.nightSurgeStartHour ?? 22),
+        endHour: Number(fareConfig.nightSurgeEndHour ?? 6),
+        multiplier: Number(fareConfig.nightSurgeMultiplier),
+      },
+    ];
   }
-
-  return 1;
+  return { peak, night };
 };
+
+/**
+ * Surge for a moment in time. Peak and night windows are evaluated together
+ * and the HIGHEST matching multiplier applies — they never compound, so a
+ * window drawn to overlap another can't produce a 1.5 × 1.8 = 2.7× fare
+ * nobody configured.
+ */
+export const surgeAt = (
+  fareConfig: any,
+  when: Date = new Date(),
+): { multiplier: number; label?: string } => {
+  const hour = when.getHours();
+  const { peak, night } = surgeWindowsFor(fareConfig);
+  let best = { multiplier: 1, label: undefined as string | undefined };
+  for (const w of [...peak, ...night]) {
+    if (hourInWindow(hour, w) && w.multiplier > best.multiplier) {
+      best = { multiplier: w.multiplier, label: w.label };
+    }
+  }
+  return best;
+};
+
+// ── Fare ────────────────────────────────────────────────────────────────────
 
 /**
  * Calculate fare for a booking
@@ -102,23 +175,29 @@ export const calculateFare = async (
   // Get fare config
   const fareConfig = await FareConfig.findOne({ isActive: true });
   const gstPercentage = fareConfig?.gstPercentage || 5;
-  const minimumFare = fareConfig?.minimumFare || 50;
+
+  // The rate card: this vehicle type's Default, or its override for the
+  // pickup city. Minimum fare and free waiting come from the same card, so
+  // a bike's floor no longer has to equal a truck's.
+  const rates: EffectiveRates = resolveRates(vehicleType, fareConfig, input.city);
+  const minimumFare = rates.minimumFare;
 
   // Calculate base fare
-  const baseFare = vehicleType.baseFare;
+  const baseFare = rates.baseFare;
 
   // Calculate distance charge
   const chargeableDistance = Math.max(
     0,
     input.distanceKm - vehicleType.minDistanceKm,
   );
-  const distanceCharge = chargeableDistance * vehicleType.perKmRate;
+  const distanceCharge = chargeableDistance * rates.perKmRate;
 
   // Calculate time charge
-  const timeCharge = input.durationMin * vehicleType.perMinuteRate;
+  const timeCharge = input.durationMin * rates.perMinuteRate;
 
   // Get surge multiplier
-  const surgeMultiplier = await getSurgeMultiplier(input.scheduledTime);
+  const surge = surgeAt(fareConfig, input.scheduledTime);
+  const surgeMultiplier = surge.multiplier;
   const baseFareWithSurge = baseFare + distanceCharge + timeCharge;
   const surgeCharge =
     surgeMultiplier > 1 ? baseFareWithSurge * (surgeMultiplier - 1) : 0;
@@ -197,6 +276,7 @@ export const calculateFare = async (
     timeCharge: Math.round(timeCharge * 100) / 100,
     surgeCharge: Math.round(surgeCharge * 100) / 100,
     surgeMultiplier,
+    surgeLabel: surge.label,
     addonCharges: Math.round(addonCharges * 100) / 100,
     stopCharges: Math.round(stopCharges * 100) / 100,
     loadingUnloadingCharge: Math.round(loadingUnloadingCharge * 100) / 100,
@@ -211,20 +291,38 @@ export const calculateFare = async (
     finalFare: Math.round(finalFare * 100) / 100,
     // Same source of truth calculateWaitingCharges bills from, so what the
     // customer is quoted is exactly what they'll be charged.
-    freeWaitingMinutes: fareConfig?.freeWaitingMinutes ?? 10,
+    freeWaitingMinutes: rates.freeWaitingMinutes,
     waitingChargePerMin: fareConfig?.waitingChargePerMin ?? 2,
+    rateSource: rates.rateSource,
+    rateCity: rates.rateCity,
   };
 };
 
 /**
- * Calculate waiting charges after trip
+ * Calculate waiting charges after trip. Free minutes come from the vehicle
+ * type's rate card (city-aware) when the trip is known; the global figure
+ * otherwise.
  */
 export const calculateWaitingCharges = async (
   waitingMinutes: number,
+  context?: { vehicleTypeId?: Types.ObjectId | string | null; city?: string | null },
 ): Promise<number> => {
   const fareConfig = await FareConfig.findOne({ isActive: true });
-  const freeWaitingMinutes = fareConfig?.freeWaitingMinutes || 10;
-  const waitingChargePerMin = fareConfig?.waitingChargePerMin || 2;
+  let freeWaitingMinutes = fareConfig?.freeWaitingMinutes || 10;
+  // Waiting beyond the free minutes is billed at the vehicle type's own
+  // per-minute rate (city rate card aware) — the same figure the customer is
+  // quoted for trip time. The global waitingChargePerMin is only the fallback
+  // for a booking with no vehicle type, and is no longer an admin-facing field.
+  let waitingChargePerMin = fareConfig?.waitingChargePerMin || 2;
+
+  if (context?.vehicleTypeId) {
+    const vt = await VehicleType.findById(context.vehicleTypeId).lean();
+    if (vt) {
+      const rates = resolveRates(vt, fareConfig, context.city);
+      freeWaitingMinutes = rates.freeWaitingMinutes;
+      if (rates.perMinuteRate > 0) waitingChargePerMin = rates.perMinuteRate;
+    }
+  }
 
   const chargeableMinutes = Math.max(0, waitingMinutes - freeWaitingMinutes);
   return Math.round(chargeableMinutes * waitingChargePerMin * 100) / 100;
@@ -239,8 +337,9 @@ export const recalculateFareAfterTrip = async (
   actualDurationMin: number,
   waitingMinutes: number,
   additionalTolls: number = 0,
+  context?: { vehicleTypeId?: Types.ObjectId | string | null; city?: string | null },
 ): Promise<FareBreakdown> => {
-  const waitingCharge = await calculateWaitingCharges(waitingMinutes);
+  const waitingCharge = await calculateWaitingCharges(waitingMinutes, context);
 
   // For now, keep the original fare but add waiting and toll charges
   // In production, you might recalculate based on actual distance
@@ -267,12 +366,14 @@ export const getFareEstimate = async (
   distanceKm: number,
   durationMin: number,
   serviceType: "WITHIN_CITY" | "OUTSTATION" = "WITHIN_CITY",
+  city?: string | null,
 ) => {
   const fare = await calculateFare({
     vehicleTypeId,
     distanceKm,
     durationMin,
     serviceType,
+    city,
   });
 
   // Add 10% buffer for estimate range
@@ -284,4 +385,22 @@ export const getFareEstimate = async (
     fareRange: { min: minFare, max: maxFare },
     breakdown: fare,
   };
+};
+
+/**
+ * The commission percentage a completed trip settles at: the vehicle type's
+ * own figure (city-aware) when set, otherwise the global FareConfig value.
+ * Used at completion so the driver's frozen earnings follow the same card
+ * that priced the trip.
+ */
+export const commissionPercentFor = async (
+  vehicleTypeId: Types.ObjectId | string | null | undefined,
+  city?: string | null,
+): Promise<number> => {
+  const fareConfig = await FareConfig.findOne({ isActive: true }).lean();
+  if (!vehicleTypeId) {
+    return Number((fareConfig as any)?.driverCommissionPercent ?? 20);
+  }
+  const vt = await VehicleType.findById(vehicleTypeId).lean();
+  return resolveRates(vt, fareConfig, city).commissionPercent;
 };

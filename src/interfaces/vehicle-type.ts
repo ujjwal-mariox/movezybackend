@@ -33,6 +33,23 @@ export interface IVehicleType {
   perMinuteRate: number;
   minDistanceKm: number;
 
+  /** null = use the global FareConfig value. */
+  minimumFare?: number | null;
+  freeWaitingMinutes?: number | null;
+  commissionPercent?: number | null;
+
+  /** City rate cards; each row may name several cities. Top-level = Default. */
+  cityOverrides?: {
+    cities: string[];
+    baseFare?: number | null;
+    perKmRate?: number | null;
+    perMinuteRate?: number | null;
+    minimumFare?: number | null;
+    freeWaitingMinutes?: number | null;
+    commissionPercent?: number | null;
+    isActive?: boolean;
+  }[];
+
   surgeMultiplier?: number;
   cancellationFee?: number;
 

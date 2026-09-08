@@ -1,6 +1,25 @@
 import mongoose, { Schema } from "mongoose";
 import { IVehicleType } from "../interfaces/vehicle-type";
 
+/**
+ * A per-city rate card row. `cities` may list several cities (the client asked
+ * for multi-city rows), and every rate is optional — a blank one falls through
+ * to the vehicle type's default. See vehicle-rate.service.resolveRates.
+ */
+const CityOverrideSchema = new Schema(
+  {
+    cities: [{ type: String, trim: true }],
+    baseFare: { type: Number, min: 0, default: null },
+    perKmRate: { type: Number, min: 0, default: null },
+    perMinuteRate: { type: Number, min: 0, default: null },
+    minimumFare: { type: Number, min: 0, default: null },
+    freeWaitingMinutes: { type: Number, min: 0, default: null },
+    commissionPercent: { type: Number, min: 0, max: 100, default: null },
+    isActive: { type: Boolean, default: true },
+  },
+  { _id: false },
+);
+
 const VehicleTypeSchema = new Schema<IVehicleType>(
   {
     name: { type: String, required: true, unique: true },
@@ -20,6 +39,15 @@ const VehicleTypeSchema = new Schema<IVehicleType>(
     lengthFt: { type: Number, default: 0, min: 0 },
     breadthFt: { type: Number, default: 0, min: 0 },
     heightFt: { type: Number, default: 0, min: 0 },
+    // Per-vehicle values the client asked to move off the global Commission
+    // & Charges page. null = inherit the global FareConfig figure, so a type
+    // the admin never touches behaves exactly as before.
+    minimumFare: { type: Number, min: 0, default: null },
+    freeWaitingMinutes: { type: Number, min: 0, default: null },
+    commissionPercent: { type: Number, min: 0, max: 100, default: null },
+    // City-specific rate cards (Pune / Mumbai / Nagpur ...); the top-level
+    // fields are the "Default" every city falls back to.
+    cityOverrides: { type: [CityOverrideSchema], default: [] },
     baseFare: { type: Number, required: true, min: 0 },
     perKmRate: { type: Number, required: true, min: 0 },
     perMinuteRate: { type: Number, required: true, min: 0 },

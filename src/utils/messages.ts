@@ -47,6 +47,18 @@ export type MessageKey =
   | "personal_info_updated"
   | "kyc_documents_uploaded"
   | "vehicle_added"
+  | "vehicle_documents_updated"
+  | "vehicle_documents_expired"
+  | "invalid_fuel_type"
+  | "invalid_fuel_type_for_two_wheeler"
+  | "invalid_body_type_for_two_wheeler"
+  | "active_trip_in_progress"
+  | "vehicle_fee_unpaid"
+  | "vehicle_not_approved"
+  | "vehicle_not_found"
+  | "vehicle_activated"
+  | "vehicle_updated"
+  | "vehicle_registered_to_another_partner"
   | "registration_number_exists"
   | "personal_info_incomplete"
   | "kyc_incomplete"
@@ -155,6 +167,42 @@ export default function messages(lang: Lang = "en"): MessageMap {
     },
     vehicle_added: {
       en: "Vehicle added successfully",
+    },
+    vehicle_documents_updated: {
+      en: "Document dates updated",
+    },
+    vehicle_documents_expired: {
+      en: "A document for this vehicle has expired. Update it to continue receiving bookings",
+    },
+    invalid_fuel_type: {
+      en: "Choose a valid fuel type (Petrol, Diesel, CNG or Electric)",
+    },
+    invalid_fuel_type_for_two_wheeler: {
+      en: "A two-wheeler can only be Petrol or Electric",
+    },
+    invalid_body_type_for_two_wheeler: {
+      en: "For a two-wheeler, choose Scooter or Bike",
+    },
+    active_trip_in_progress: {
+      en: "Finish your current trip before switching vehicles",
+    },
+    vehicle_fee_unpaid: {
+      en: "Pay the joining fee for this vehicle before activating it",
+    },
+    vehicle_not_approved: {
+      en: "This vehicle has not been approved yet",
+    },
+    vehicle_not_found: {
+      en: "Vehicle not found",
+    },
+    vehicle_activated: {
+      en: "This vehicle is now your active vehicle",
+    },
+    vehicle_updated: {
+      en: "Vehicle details updated",
+    },
+    vehicle_registered_to_another_partner: {
+      en: "This vehicle number is already registered with another partner. If this is your vehicle, contact support.",
     },
     registration_number_exists: {
       en: "Registration number already exists",

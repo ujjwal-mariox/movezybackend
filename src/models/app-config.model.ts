@@ -10,6 +10,16 @@ export interface IAppConfig {
   isEditable: boolean;
 }
 
+export interface ISurgeWindow {
+  label?: string;
+  /** 0-23, inclusive start. */
+  startHour: number;
+  /** 0-23, exclusive end; may be less than startHour to wrap midnight. */
+  endHour: number;
+  /** >= 1. 1 = no surge. */
+  multiplier: number;
+}
+
 export interface IFareConfig {
   _id: Types.ObjectId;
   name: string;
@@ -27,6 +37,13 @@ export interface IFareConfig {
   peakHourSurgeMultiplier: number;
   peakHourStart: number;
   peakHourEnd: number;
+  /**
+   * Multiple surge windows, replacing the single start/end/multiplier trio
+   * above (kept for older rows; ignored once a window exists). Windows may
+   * wrap midnight (22 -> 6). When several match, the highest wins.
+   */
+  peakWindows: ISurgeWindow[];
+  nightWindows: ISurgeWindow[];
   /**
    * Refund ceiling by cancellation stage, as a percentage of the fare.
    *
@@ -90,6 +107,16 @@ const AppConfigSchema = new Schema<IAppConfig>(
 );
 
 // Fare Config Schema
+const SurgeWindowSchema = new Schema<ISurgeWindow>(
+  {
+    label: { type: String, trim: true },
+    startHour: { type: Number, required: true, min: 0, max: 23 },
+    endHour: { type: Number, required: true, min: 0, max: 23 },
+    multiplier: { type: Number, required: true, min: 1 },
+  },
+  { _id: false },
+);
+
 const FareConfigSchema = new Schema<IFareConfig>(
   {
     name: {
@@ -169,6 +196,9 @@ const FareConfigSchema = new Schema<IFareConfig>(
       type: Number,
       default: 10, // 10 AM
     },
+    // Multi-row surge (client: "Morning 8-10 AM 1.5x; Evening 6-8 PM 1.8x").
+    peakWindows: { type: [SurgeWindowSchema], default: [] },
+    nightWindows: { type: [SurgeWindowSchema], default: [] },
     isActive: {
       type: Boolean,
       default: true,

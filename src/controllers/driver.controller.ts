@@ -36,6 +36,7 @@ import { AppConfig, FareConfig } from "../models/app-config.model";
 import { cache } from "../utils/redis.util";
 import Payout from "../models/payout.model";
 import * as DriverPayoutService from "../services/driver-payout.service";
+import * as VehicleLifecycle from "../services/vehicle-lifecycle.service";
 
 const DEFAULT_JOINING_FEE = 999;
 
@@ -98,6 +99,48 @@ const DISCOVERABLE_BOOKING_STATUSES = ["SEARCHING", "PENDING"];
 // PROFILE
 // =====================
 
+/**
+ * Per-vehicle scoping for history/earnings (client: "display history and
+ * earnings based on the active vehicle"). A partner with ONE vehicle sees
+ * everything as before. With several, figures default to the selected
+ * vehicle; `?vehicleId=` views another and `?allVehicles=true` views all.
+ */
+const resolveVehicleScope = async (
+  driverId: string,
+  query: any,
+): Promise<{
+  filter: Record<string, any>;
+  vehicles: any[];
+  activeVehicleId: string | null;
+  scopedVehicleId: string | null;
+}> => {
+  const vehicles = await VehicleModel.find({
+    driverId: new Types.ObjectId(driverId),
+    isDeleted: { $ne: true },
+  })
+    .select("vehicleNumber vehicleType vehicleTypeId isPrimary verificationStatus onboardingFeePaid dispatchBlock")
+    .sort({ isPrimary: -1, createdAt: 1 })
+    .lean();
+  const active = vehicles.find((v: any) => v.isPrimary) || null;
+  const activeVehicleId = active ? String(active._id) : null;
+
+  const requested = query?.vehicleId ? String(query.vehicleId) : null;
+  const all = String(query?.allVehicles || "") === "true";
+
+  let scopedVehicleId: string | null = null;
+  if (requested && vehicles.some((v: any) => String(v._id) === requested)) {
+    scopedVehicleId = requested;
+  } else if (!all && vehicles.length > 1 && activeVehicleId) {
+    scopedVehicleId = activeVehicleId;
+  }
+  return {
+    filter: scopedVehicleId ? { vehicleId: new Types.ObjectId(scopedVehicleId) } : {},
+    vehicles,
+    activeVehicleId,
+    scopedVehicleId,
+  };
+};
+
 export const getDashboard = async (
   req: Request,
   res: Response,
@@ -106,6 +149,9 @@ export const getDashboard = async (
   try {
     const driverId = (req as any).driverId;
     const driverObjectId = new Types.ObjectId(driverId);
+
+    const scope = await resolveVehicleScope(driverId, req.query);
+    const vehicleScope = scope.filter;
 
     const now = new Date();
     const todayStart = new Date(now);
@@ -123,7 +169,10 @@ export const getDashboard = async (
     // period aggregation below pre-filters from whichever boundary is older.
     const periodEarliest = weekStart < monthStart ? weekStart : monthStart;
 
-    // Get driver's active vehicle to filter pending bookings
+    // Pending jobs are filtered by the vehicle that can actually take them —
+    // the driver's active dispatch row — regardless of which vehicle the
+    // history/earnings figures are scoped to. (The scope filter is a Booking
+    // field and must not be spread into this DriverVehicle query.)
     const activeVehicle = await DriverVehicleModel.findOne({
       driverId: driverObjectId,
       isActive: true,
@@ -183,6 +232,7 @@ export const getDashboard = async (
         {
           $match: {
             driverId: driverObjectId,
+            ...vehicleScope,
             status: "COMPLETED",
           },
         },
@@ -202,6 +252,7 @@ export const getDashboard = async (
         {
           $match: {
             driverId: driverObjectId,
+            ...vehicleScope,
             status: "COMPLETED",
             completedAt: { $gte: todayStart },
           },
@@ -216,6 +267,7 @@ export const getDashboard = async (
       ]),
       BookingModel.countDocuments({
         driverId: driverObjectId,
+        ...vehicleScope,
         status: { $in: ACTIVE_BOOKING_STATUSES },
       }),
       // Scheduled work still ahead of this driver. `upcomingServices` used to
@@ -223,17 +275,20 @@ export const getDashboard = async (
       // number twice under two different labels.
       BookingModel.countDocuments({
         driverId: driverObjectId,
+        ...vehicleScope,
         isScheduled: true,
         scheduledAt: { $gt: new Date() },
         status: { $in: ACTIVE_BOOKING_STATUSES },
       }),
       BookingModel.countDocuments({
         driverId: driverObjectId,
+        ...vehicleScope,
         status: "COMPLETED",
       }),
       BookingModel.countDocuments(pendingFilter),
       BookingModel.findOne({
         driverId: driverObjectId,
+        ...vehicleScope,
         status: { $in: ACTIVE_BOOKING_STATUSES },
       })
         .populate("userId", "fullName")
@@ -248,6 +303,7 @@ export const getDashboard = async (
         .lean(),
       BookingModel.find({
         driverId: driverObjectId,
+        ...vehicleScope,
         status: "COMPLETED",
       })
         .populate("userId", "fullName")
@@ -259,6 +315,7 @@ export const getDashboard = async (
         {
           $match: {
             driverId: driverObjectId,
+            ...vehicleScope,
             status: "COMPLETED",
             completedAt: { $gte: monthlyStart },
           },
@@ -281,6 +338,7 @@ export const getDashboard = async (
         {
           $match: {
             driverId: driverObjectId,
+            ...vehicleScope,
             status: "COMPLETED",
           },
         },
@@ -411,6 +469,18 @@ export const getDashboard = async (
       // Surfaced so the driver app can explain where the estimate comes from
       // instead of presenting a net figure with no visible derivation.
       commissionPercent,
+      // Multi-vehicle partners: which vehicle the figures below are for.
+      vehicles: scope.vehicles.map((v: any) => ({
+        id: String(v._id),
+        vehicleNumber: v.vehicleNumber || "",
+        vehicleType: v.vehicleType || "",
+        isPrimary: !!v.isPrimary,
+        verificationStatus: v.verificationStatus || "pending",
+        onboardingFeePaid: !!v.onboardingFeePaid,
+        blocked: !!v.dispatchBlock?.blocked,
+      })),
+      activeVehicleId: scope.activeVehicleId,
+      scopedVehicleId: scope.scopedVehicleId,
       stats: {
         totalEarnings: Number(lifetime.totalEarnings || 0),
         totalServices: Number(lifetime.totalServices || 0),
@@ -830,10 +900,12 @@ export const getEarnings = async (
       startDate.setMonth(startDate.getMonth() - 1);
     }
 
+    const earningsScope = await resolveVehicleScope(driverId, req.query);
     const earnings = await BookingModel.aggregate([
       {
         $match: {
           driverId: new Types.ObjectId(driverId),
+          ...earningsScope.filter,
           status: "COMPLETED",
           completedAt: { $gte: startDate },
         },
@@ -869,11 +941,13 @@ export const getEarningsHistory = async (
     const driverId = (req as any).driverId;
     const { page = 1, limit = 20 } = req.query;
 
+    const historyScope = await resolveVehicleScope(driverId, req.query);
     const bookings = await BookingModel.find({
       driverId: new Types.ObjectId(driverId),
+      ...historyScope.filter,
       status: "COMPLETED",
     })
-      .select("bookingNumber fare completedAt pickup drop distanceKm")
+      .select("bookingNumber fare completedAt pickup drop distanceKm vehicleNumber")
       .sort({ completedAt: -1 })
       .skip((Number(page) - 1) * Number(limit))
       .limit(Number(limit))
@@ -1246,7 +1320,8 @@ export const getBookingHistory = async (
     const driverId = (req as any).driverId;
     const { page = 1, limit = 20, status } = req.query;
 
-    const query: any = { driverId: new Types.ObjectId(driverId) };
+    const scope = await resolveVehicleScope(driverId, req.query);
+    const query: any = { driverId: new Types.ObjectId(driverId), ...scope.filter };
     if (status) query.status = status;
 
     const bookings = await BookingModel.find(query)
@@ -1261,7 +1336,18 @@ export const getBookingHistory = async (
 
     const total = await BookingModel.countDocuments(query);
 
-    req.rData = { bookings, total, page: Number(page), limit: Number(limit) };
+    req.rData = {
+      bookings,
+      total,
+      page: Number(page),
+      limit: Number(limit),
+      vehicles: scope.vehicles.map((v: any) => ({
+        id: String(v._id),
+        vehicleNumber: v.vehicleNumber || "",
+        isPrimary: !!v.isPrimary,
+      })),
+      scopedVehicleId: scope.scopedVehicleId,
+    };
     req.msg = "history_fetched";
     next();
   } catch (error) {
@@ -1329,6 +1415,13 @@ export const acceptBooking = async (
     await DriverModel.findByIdAndUpdate(driverId, {
       currentBookingId: new Types.ObjectId(bookingId),
     });
+
+    // Record WHICH vehicle is doing the trip (per-vehicle history/earnings).
+    try {
+      await VehicleLifecycle.stampVehicleOnBooking(bookingId, driverId);
+    } catch (stampErr) {
+      console.error("accept: vehicle stamp failed (non-fatal)", stampErr);
+    }
 
     // Record the offer outcome: this driver ACCEPTED; every other driver's
     // still-pending offer on this booking lapses now — their ring stopped the
@@ -1526,7 +1619,10 @@ export const verifyPickupOtp = async (
     if (booking.driverArrivedAt) {
       const waitedMs = booking.pickedAt.getTime() - booking.driverArrivedAt.getTime();
       const waitingMinutes = Math.max(0, Math.floor(waitedMs / 60000));
-      const waitingCharge = await FareService.calculateWaitingCharges(waitingMinutes);
+      const waitingCharge = await FareService.calculateWaitingCharges(waitingMinutes, {
+        vehicleTypeId: booking.vehicleTypeId as any,
+        city: (booking as any).pickup?.city,
+      });
 
       booking.waitingMinutes = waitingMinutes;
       booking.waitingCharge = waitingCharge;
@@ -1745,8 +1841,12 @@ export const completeTrip = async (
     // Commission is charged on the full subtotal, not on the discounted total:
     // promo and coin discounts are Movezy's marketing cost, and the driver did
     // the same trip either way.
-    const settlementConfig = await FareConfig.findOne({ isActive: true });
-    const commissionPercent = settlementConfig?.driverCommissionPercent ?? 20;
+    // Commission by vehicle type and city (client request), falling back to
+    // the global FareConfig figure — the same card that priced the trip.
+    const commissionPercent = await FareService.commissionPercentFor(
+      booking.vehicleTypeId as any,
+      (booking as any).pickup?.city,
+    );
     const settlementBase = booking.subtotal ?? 0;
     const commissionAmount =
       Math.round(((settlementBase * commissionPercent) / 100) * 100) / 100;
@@ -2159,7 +2259,12 @@ export const getMyVehicles = async (
       .select("fullName mobileNumber referredBy onboardingFeePaid profilePhoto")
       .lean();
 
-    req.rData = { vehicles, driver };
+    const active = (vehicles as any[]).find((v) => v.isPrimary);
+    req.rData = {
+      vehicles,
+      driver,
+      activeVehicleId: active ? String(active._id) : null,
+    };
     req.msg = "my_vehicles_fetched";
     next();
   } catch (error) {
@@ -2209,16 +2314,47 @@ export const addMyVehicle = async (
       catalogTypeId = catalogType._id as Types.ObjectId;
     }
 
-    // Check duplicate
-    const exists = await VehicleModel.findOne({
-      vehicleNumber: vehicleNumber.toUpperCase(),
-      isDeleted: { $ne: true },
-    });
-    if (exists) {
+    // Duplicate registration — refused when another partner holds the number.
+    const conflict = await VehicleLifecycle.findVehicleConflict(vehicleNumber, driverId);
+    if (conflict.other) {
+      req.rCode = 0;
+      req.msg = "vehicle_registered_to_another_partner";
+      return next();
+    }
+    if (conflict.own) {
       req.rCode = 0;
       req.msg = "vehicle_number_already_exists";
       return next();
     }
+
+    // Attribute rules (canonical fuel; Scooter/Bike + Petrol/Electric for 2W).
+    const normalizedFuel = VehicleLifecycle.normalizeFuelType(fuelType);
+    if (fuelType && !normalizedFuel) {
+      req.rCode = 0;
+      req.msg = "invalid_fuel_type";
+      return next();
+    }
+    const normalizedBody = VehicleLifecycle.normalizeBodyType(vehicleBodyType);
+    let categoryCode: string | undefined = vehicleType;
+    if (catalogTypeId) {
+      const ct = await VehicleTypeModel.findById(catalogTypeId).select("categoryCode").lean();
+      categoryCode = (ct as any)?.categoryCode || categoryCode;
+    }
+    const attrError = VehicleLifecycle.validateVehicleAttributes(
+      categoryCode,
+      normalizedBody,
+      normalizedFuel,
+    );
+    if (attrError) {
+      req.rCode = 0;
+      req.msg = attrError;
+      return next();
+    }
+    const parseDate = (v: unknown): Date | undefined => {
+      if (v === undefined || v === null || v === "") return undefined;
+      const d = new Date(String(v));
+      return Number.isNaN(d.getTime()) ? undefined : d;
+    };
 
     // Handle file uploads
     let rcImageUrl = "";
@@ -2249,9 +2385,12 @@ export const addMyVehicle = async (
       vehicleNumber,
       vehicleType: vehicleType || "4W",
       vehicleTypeId: catalogTypeId,
-      vehicleBodyType,
-      fuelType,
+      vehicleBodyType: normalizedBody,
+      fuelType: normalizedFuel,
       city,
+      rcExpiryDate: parseDate(req.body.rcExpiryDate),
+      insuranceExpiryDate: parseDate(req.body.insuranceExpiryDate),
+      pucExpiryDate: parseDate(req.body.pucExpiryDate),
       rcFrontImage: rcImageUrl,
       vehicleImages: vehicleImageUrls,
       assignedDriverName,
@@ -2261,6 +2400,7 @@ export const addMyVehicle = async (
       isPrimary: false,
       isActive: true,
     });
+    await VehicleLifecycle.syncDispatchRow(vehicle);
 
     req.rData = vehicle;
     req.msg = "vehicle_added";
@@ -2466,6 +2606,16 @@ export const addVehicle = async (
   try {
     const driverId = (req as any).driverId;
     const { vehicleTypeId, registrationNumber } = req.body;
+
+    const conflict = await VehicleLifecycle.findVehicleConflict(
+      String(registrationNumber || ""),
+      driverId,
+    );
+    if (conflict.other) {
+      req.rCode = 0;
+      req.msg = "vehicle_registered_to_another_partner";
+      return next();
+    }
 
     const vehicle = await DriverVehicleModel.create({
       driverId: new Types.ObjectId(driverId),
@@ -2845,11 +2995,12 @@ export const getBadges = async (
 
     // Stats for the wider catalog — every figure below is real driver data.
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    const badgeFareConfig = await FareConfig.findOne({ isActive: true })
-      .select("peakHourStart peakHourEnd")
-      .lean();
-    const peakStart = Number((badgeFareConfig as any)?.peakHourStart ?? 8);
-    const peakEnd = Number((badgeFareConfig as any)?.peakHourEnd ?? 11);
+    const badgeFareConfig = await FareConfig.findOne({ isActive: true }).lean();
+    // First configured peak window (multi-row surge); legacy fields via the
+    // same helper when no rows exist.
+    const firstPeak = FareService.surgeWindowsFor(badgeFareConfig).peak[0];
+    const peakStart = Number(firstPeak?.startHour ?? 8);
+    const peakEnd = Number(firstPeak?.endHour ?? 11);
 
     const [
       earningsAgg,
@@ -4366,6 +4517,33 @@ export const acknowledgeTripInstructions = async (
 
     req.rData = { acknowledged: true };
     req.msg = "instructions_acknowledged";
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /driver/app/my-vehicles/:vehicleId/activate
+ * Make this the partner's active vehicle — the one dispatch matches and the
+ * one history/earnings show. Exactly one per partner; refused mid-trip.
+ */
+export const activateMyVehicle = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  try {
+    const driverId = (req as any).driverId;
+    const { vehicleId } = req.params;
+    const result = await VehicleLifecycle.setActiveVehicle(driverId, vehicleId);
+    if (!result.ok) {
+      req.rCode = 0;
+      req.msg = result.msg;
+      return next();
+    }
+    req.rData = { vehicle: result.vehicle, activeVehicleId: String(result.vehicle._id) };
+    req.msg = "vehicle_activated";
     next();
   } catch (error) {
     next(error);

@@ -9,6 +9,7 @@ import VehicleType from "../../models/vehicle-type.model";
 import { emitToUser } from "../../utils/socket.util";
 import * as notificationService from "../../services/notification.service";
 import { auditFromRequest } from "./audit-log.controller";
+import * as VehicleLifecycle from "../../services/vehicle-lifecycle.service";
 
 /**
  * Normalize a DriverKyc record into the flat `documents[]` array the admin
@@ -398,60 +399,21 @@ export const verifyDriver = async (req: Request, res: Response) => {
     console.error("failed to propagate verification to vehicles", e);
   }
 
-  // Make approved vehicles actually dispatchable.
-  //
-  // Dispatch matches drivers on DriverVehicle rows. Only the signup flow ever
-  // created one, so a vehicle added later through the app sat approved in the
-  // `vehicles` collection and was never sent a single booking — the two
-  // collections were never bridged. Approval is the right moment to bridge:
-  // a pending vehicle must not receive jobs.
+  // Dispatch rows are DERIVED (vehicle-lifecycle.service): approved ∧ the
+  // partner's selected vehicle ∧ not document-blocked. This replaces a loop
+  // that switched EVERY vehicle on at approval — which is how nine drivers
+  // ended up dispatchable on several vehicles at once.
   try {
-    const driverVehicles = await Vehicle.find({
-      driverId: driver._id,
-      isDeleted: { $ne: true },
-    })
-      .select("vehicleNumber vehicleTypeId vehicleType")
-      .lean();
-
-    for (const v of driverVehicles as any[]) {
-      if (!v.vehicleNumber) continue;
-
-      // Prefer the exact type the driver registered. Older rows predate
-      // `vehicleTypeId` and only know a category ("2W"), so fall back to that
-      // category's designated default rather than stranding the vehicle
-      // un-dispatchable forever — which is what used to happen, silently.
-      let typeId = v.vehicleTypeId;
-      if (!typeId && v.vehicleType) {
-        const fallback = await VehicleType.findOne({
-          categoryCode: v.vehicleType,
-          isDefaultForCategory: true,
-          isActive: true,
-        }).select("_id");
-        typeId = fallback?._id;
-      }
-      if (!typeId) {
-        console.warn(
-          `[approve] vehicle ${v.vehicleNumber} has no catalog type and its category (${v.vehicleType}) has no default — it will not be dispatchable`,
-        );
-        continue;
-      }
-
-      await DriverVehicle.findOneAndUpdate(
-        { registrationNumber: String(v.vehicleNumber).toUpperCase() },
-        {
-          $set: {
-            driverId: driver._id,
-            vehicleTypeId: typeId,
-            // Rejecting must take the vehicle back out of dispatch.
-            isActive: action === "approve",
-            isDeleted: false,
-          },
-        },
-        { upsert: true, new: true },
-      );
+    if (action === "approve") {
+      const first = await Vehicle.findOne({
+        driverId: driver._id,
+        isDeleted: { $ne: true },
+      }).sort({ isPrimary: -1, createdAt: 1 });
+      if (first) await VehicleLifecycle.ensurePrimaryAfterApproval(first);
     }
+    await VehicleLifecycle.syncDriverDispatchRows(driver._id);
   } catch (e) {
-    console.error("failed to sync dispatch vehicles", e);
+    console.error("failed to sync dispatch rows after verification", e);
   }
 
   // ...and to their KYC record, for the same reason.
@@ -1432,38 +1394,19 @@ export const verifyDriverVehicle = async (req: Request, res: Response) => {
     action === "reject" ? String(rejectionReason) : undefined;
   await vehicle.save();
 
-  // Sync the dispatch row for THIS vehicle only — same fallback as the
-  // driver-level bridge: rows predating vehicleTypeId only know a category,
-  // so use that category's designated default rather than stranding the
-  // vehicle un-dispatchable.
-  if (vehicle.vehicleNumber) {
-    let typeId: any = (vehicle as any).vehicleTypeId;
-    if (!typeId && (vehicle as any).vehicleType) {
-      const fallback = await VehicleType.findOne({
-        categoryCode: (vehicle as any).vehicleType,
-        isDefaultForCategory: true,
-        isActive: true,
-      }).select("_id");
-      typeId = fallback?._id;
-    }
-    if (typeId) {
-      await DriverVehicle.findOneAndUpdate(
-        { registrationNumber: String(vehicle.vehicleNumber).toUpperCase() },
-        {
-          $set: {
-            driverId: vehicle.driverId,
-            vehicleTypeId: typeId,
-            isActive: action === "approve",
-            isDeleted: false,
-          },
-        },
-        { upsert: true, new: true },
-      );
-    } else if (action === "approve") {
-      console.warn(
-        `[vehicle-verify] ${vehicle.vehicleNumber} approved but has no catalog type and no category default — it will NOT be dispatchable`,
-      );
-    }
+  // Dispatch row derived from one rule (approved ∧ selected ∧ not blocked).
+  // On approval, this becomes the partner's active vehicle only if they have
+  // no usable one yet — an approval never swaps the vehicle under a partner
+  // mid-shift; they switch from My Vehicles.
+  if (action === "approve") {
+    await VehicleLifecycle.ensurePrimaryAfterApproval(vehicle);
+  } else {
+    await VehicleLifecycle.syncDriverDispatchRows(vehicle.driverId);
+  }
+  if (action === "approve" && !(vehicle as any).vehicleTypeId && !(vehicle as any).vehicleType) {
+    console.warn(
+      `[vehicle-verify] ${vehicle.vehicleNumber} approved but has no catalog type — it will NOT be dispatchable`,
+    );
   }
 
   // Tell the driver — same channel as driver-level verification.

@@ -48,6 +48,10 @@ export interface IDriver {
   /** Short display ID ("DRV-0042") for admin search and support calls. */
   driverCode?: string;
 
+  /** Licence-expiry enforcement (document-expiry.service). */
+  documentBlock?: { blocked: boolean; reasons: string[]; blockedAt?: Date };
+  licenceExpiryReminders?: { expiryDate?: Date; daysSent: number[] };
+
   mobileNumber: string;
   countryCode: string;
   userId?: Types.ObjectId;
