@@ -123,17 +123,33 @@ app.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS) || 1);
 /**
  * CORS
  */
+// CORS_ORIGIN may list several origins, comma-separated (admin panel, the
+// marketing website, a staging build). Public, unauthenticated endpoints the
+// website reads — policies, support contact, the contact form — accept any
+// origin: they carry no credentials and are meant to be embedded anywhere.
+const allowedOrigins = new Set(
+  String(config.cors?.origin || "*")
+    .split(",")
+    .map((o) => o.trim().replace(/\/$/, ""))
+    .filter(Boolean),
+);
+const PUBLIC_CORS_PREFIXES = ["/v1/api/content/", "/v1/api/contact", "/v1/api/support-contact", "/health"];
 app.use(
-  cors({
-    origin: config.cors?.origin || "*",
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "x-user-data",
-      "x-request-id",
-    ],
-    credentials: true,
+  cors((req, cb) => {
+    const origin = String(req.header("Origin") || "").replace(/\/$/, "");
+    const isPublic = PUBLIC_CORS_PREFIXES.some((p) => req.path.startsWith(p));
+    const allowed =
+      isPublic ||
+      !origin ||
+      allowedOrigins.has("*") ||
+      allowedOrigins.has(origin) ||
+      /^https?:\/\/localhost(:\d+)?$/.test(origin);
+    cb(null, {
+      origin: allowed,
+      methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+      allowedHeaders: ["Content-Type", "Authorization", "x-user-data", "x-request-id"],
+      credentials: !isPublic,
+    });
   }),
 );
 
