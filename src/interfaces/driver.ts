@@ -73,6 +73,8 @@ export interface IDriver {
 
   isActive: boolean;
   isOnline: boolean;
+  lastHeartbeatAt?: Date;
+  lastSocketDisconnectAt?: Date;
   isDeleted: boolean;
   deletedAt?: Date;
 

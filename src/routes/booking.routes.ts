@@ -4,6 +4,7 @@ import AuthMiddleware from "../middlewares/auth.middleware";
 const { verifyUserToken } = AuthMiddleware();
 import { rateLimiters } from "../middlewares/rate-limit.middleware";
 import * as bookingController from "../controllers/booking.controller";
+import * as CallController from "../controllers/call.controller";
 
 const router = Router();
 
@@ -64,6 +65,8 @@ router.get("/:bookingId", bookingController.getBookingById);
 
 // Track active booking
 router.get("/:bookingId/track", bookingController.trackBooking);
+// Masked call to the driver (server-bridged; the driver's number never reaches the app)
+router.post("/:bookingId/call", CallController.userCallDriver);
 
 // Get booking invoice
 router.get("/:bookingId/invoice", bookingController.getBookingInvoice);

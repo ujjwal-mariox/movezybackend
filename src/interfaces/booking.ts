@@ -1,4 +1,5 @@
 import { Types } from "mongoose";
+import type { ITaxBreakdown } from "../models/tax-breakdown.schema";
 
 export type BookingStatus =
   | "DRAFT"
@@ -43,6 +44,7 @@ export interface ILocation {
   lng: number;
   /** Pickup city, when the app captured it (drives city-specific rates). */
   city?: string;
+  state?: string;
   contactName?: string;
   contactPhone?: string;
   floor?: number;
@@ -146,6 +148,7 @@ export interface IBooking {
   gstPercentage?: number;
   gstin?: string;
   gstBusinessName?: string;
+  taxBreakdown?: ITaxBreakdown;
 
   // Final amounts
   subtotal: number;
@@ -190,8 +193,10 @@ export interface IBooking {
   assignedAt?: Date;
   driverArrivedAt?: Date;
   pickedAt?: Date;
+  startedAt?: Date;
   completedAt?: Date;
   cancelledAt?: Date;
+  searchStartedAt?: Date;
 
   estimatedArrivalTime?: number;
   estimatedDuration?: number;

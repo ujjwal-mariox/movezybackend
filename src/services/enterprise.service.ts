@@ -365,6 +365,11 @@ export const createCreditBooking = async (
     durationMin: route.durationMin,
     serviceType,
     stops: stops.length,
+    // Registered business customer: place of supply is the enterprise's state.
+    taxContext: {
+      pickup: { lat: bookingData?.pickup?.lat, lng: bookingData?.pickup?.lng, state: enterprise?.state },
+      customerGstin: enterprise?.gstin,
+    },
   });
 
   // The enterprise's negotiated discount comes off the priced fare.
@@ -425,7 +430,9 @@ export const createCreditBooking = async (
       surgeMultiplier: fareBreakdown.surgeMultiplier || 1,
       stopCharges: fareBreakdown.stopCharges || 0,
       gstAmount: fareBreakdown.gstAmount || 0,
-      gstPercentage: fareBreakdown.gstPercentage || 5,
+      gstPercentage: fareBreakdown.gstPercentage ?? 0,
+      taxBreakdown: fareBreakdown.taxBreakdown,
+      gstin: enterprise?.gstin || undefined,
       subtotal: fareBreakdown.subtotal,
       enterpriseDiscount: discountAmount,
       totalDiscount: discountAmount,

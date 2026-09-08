@@ -27,6 +27,15 @@ import { cache } from "../utils/redis.util";
 import { getDistanceForLegs } from "../services/routing.service";
 import { generateBookingNumber } from "../services/booking-number.service";
 import { resolveBookingCity } from "../services/vehicle-rate.service";
+import { computeBookingTax } from "../services/tax.service";
+import { presentPhone } from "../services/call-masking.service";
+
+/** The driver's number as the customer may see it (masked when number hiding is on). */
+const maskDriver = <T,>(b: T): T => {
+  const d: any = (b as any)?.driverId;
+  if (d && typeof d === "object" && d.mobileNumber) d.mobileNumber = presentPhone(d.mobileNumber);
+  return b;
+};
 import { Types } from "mongoose";
 
 /** Guards against a client declaring a 10,000-floor building. */
@@ -297,6 +306,7 @@ export const createBooking = async (req: Request, res: Response) => {
       pickupLocation,
       pickupAddress,
       pickupCity,
+      pickupState,
       dropLocation,
       dropAddress,
       distanceKm,
@@ -425,6 +435,20 @@ export const createBooking = async (req: Request, res: Response) => {
       resolveGoodsWeight(goodsWeight)
     );
 
+    // Look up user's saved GSTIN (if any) — needed before pricing: a registered
+    // customer's state decides the CGST/SGST vs IGST split.
+    let userGstin: string | undefined;
+    let userGstBusinessName: string | undefined;
+    try {
+      const gstDoc = await UserGST.findOne({ userId, isActive: true });
+      if (gstDoc) {
+        userGstin = gstDoc.gstin;
+        userGstBusinessName = gstDoc.businessName;
+      }
+    } catch (gstErr) {
+      console.error("Failed to fetch user GST:", gstErr);
+    }
+
     // Same city resolution as the estimate, so the booking is priced on the
     // card the customer was quoted from.
     const bookingCity = await resolveBookingCity({
@@ -439,6 +463,16 @@ export const createBooking = async (req: Request, res: Response) => {
       durationMin: bookingDurationMin,
       serviceType: serviceType || "WITHIN_CITY",
       city: bookingCity,
+      // Place of supply for the GST split: the pickup (or the customer's GSTIN).
+      taxContext: {
+        pickup: {
+          lat: pickupLocation?.lat,
+          lng: pickupLocation?.lng,
+          city: bookingCity,
+          state: pickupState || pickupLocation?.state,
+        },
+        customerGstin: userGstin,
+      },
       addons: resolvedAddons,
       // Was `loadingUnloading?.loadingCharge + loadingUnloading?.unloadingCharge`
       // — a price straight from the request body. Loading/unloading is priced
@@ -495,19 +529,6 @@ export const createBooking = async (req: Request, res: Response) => {
     // bookingNumber has a non-sparse unique index, so a path that omits it
     // fails with E11000 on the second such booking.
     const bookingNumber = await generateBookingNumber();
-
-    // Look up user's saved GSTIN (if any)
-    let userGstin: string | undefined;
-    let userGstBusinessName: string | undefined;
-    try {
-      const gstDoc = await UserGST.findOne({ userId, isActive: true });
-      if (gstDoc) {
-        userGstin = gstDoc.gstin;
-        userGstBusinessName = gstDoc.businessName;
-      }
-    } catch (gstErr) {
-      console.error("Failed to fetch user GST:", gstErr);
-    }
 
     // Resolve goodsType: if an ObjectId was sent, look up the category; otherwise use as-is
     let resolvedGoodsType = goodsType || "PERSONAL";
@@ -619,6 +640,7 @@ export const createBooking = async (req: Request, res: Response) => {
         lat: pickupLocation.lat,
         lng: pickupLocation.lng,
         ...(bookingCity ? { city: bookingCity } : {}),
+        ...(pickupState || pickupLocation?.state ? { state: pickupState || pickupLocation?.state } : {}),
       },
       drop: {
         address: safeDropAddress,
@@ -678,9 +700,10 @@ export const createBooking = async (req: Request, res: Response) => {
       coinDiscount,
       userDiscount,
       gstAmount: fareBreakdown.gstAmount || 0,
-      gstPercentage: fareBreakdown.gstPercentage || 5,
+      gstPercentage: fareBreakdown.gstPercentage ?? 0,
       gstin: userGstin,
       gstBusinessName: userGstBusinessName,
+      taxBreakdown: fareBreakdown.taxBreakdown,
       // Required fields: subtotal, fare, finalFare
       subtotal: subtotalAmount,
       fare: finalFare,
@@ -774,6 +797,7 @@ export const getUserBookings = async (req: Request, res: Response) => {
         .populate("driverId", "fullName mobileNumber profilePhoto"),
       Booking.countDocuments(query),
     ]);
+    bookings.forEach(maskDriver);
 
     res.json({
       success: true,
@@ -805,9 +829,11 @@ export const getBookingById = async (req: Request, res: Response) => {
 
     // NOTE: Booking has no `vehicleId` field (only vehicleTypeId) — populating it
     // throws a Mongoose strictPopulate error (500). Removed.
-    const booking = await Booking.findOne({ _id: bookingId, userId })
-      .populate("vehicleTypeId", "name icon image capacity")
-      .populate("driverId", "fullName mobileNumber profilePhoto rating");
+    const booking = maskDriver(
+      await Booking.findOne({ _id: bookingId, userId })
+        .populate("vehicleTypeId", "name icon image capacity")
+        .populate("driverId", "fullName mobileNumber profilePhoto rating"),
+    );
 
     if (!booking) {
       return res.status(404).json({
@@ -837,9 +863,11 @@ export const trackBooking = async (req: Request, res: Response) => {
     const userId = (req as any).user._id;
 
     // `vehicleId` is not a schema path — populating it 500s (strictPopulate). Removed.
-    const booking = await Booking.findOne({ _id: bookingId, userId })
-      .populate("driverId", "fullName mobileNumber profilePhoto rating")
-      .populate("vehicleTypeId", "name icon image");
+    const booking = maskDriver(
+      await Booking.findOne({ _id: bookingId, userId })
+        .populate("driverId", "fullName mobileNumber profilePhoto rating")
+        .populate("vehicleTypeId", "name icon image"),
+    );
 
     if (!booking) {
       return res.status(404).json({
@@ -1199,7 +1227,18 @@ export const addStop = async (req: Request, res: Response) => {
     booking.surgeMultiplier = fareBreakdown.surgeMultiplier || 1;
     booking.addonTotal = addonTotal;
     booking.gstAmount = fareBreakdown.gstAmount || 0;
-    booking.gstPercentage = fareBreakdown.gstPercentage || 5;
+    booking.gstPercentage = fareBreakdown.gstPercentage ?? booking.gstPercentage ?? 0;
+    // The split follows the new amount; the place of supply is unchanged.
+    try {
+      booking.taxBreakdown = await computeBookingTax({
+        taxableAmount: fareBreakdown.subtotal,
+        gstPercentage: booking.gstPercentage,
+        pickup: booking.pickup as any,
+        customerGstin: booking.gstin,
+      });
+    } catch (e) {
+      console.warn("[booking] tax split recompute failed:", (e as Error).message);
+    }
     // Same rule as createBooking: the fare service's subtotal is the figure
     // gstAmount and finalFare were derived from, and the one the driver's
     // commission/earnings are settled on. Re-deriving it here dropped the new

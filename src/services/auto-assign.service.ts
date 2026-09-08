@@ -5,6 +5,7 @@ import Driver from "../models/driver.model";
 import * as bookingDispatchService from "./booking-dispatch.service";
 import * as notificationService from "./notification.service";
 import { emitBookingUpdate, emitToUser } from "../utils/socket.util";
+import { presentPhone } from "./call-masking.service";
 
 /**
  * The auto-assign sweep, extracted from the admin controller so the job
@@ -48,7 +49,7 @@ const assignBookingToDriver = async (booking: any, driver: any) => {
     emitBookingUpdate(bookingIdStr, userIdStr, driverIdStr, "ASSIGNED", {
       driverId: driverIdStr,
       driverName: driver.fullName,
-      driverPhone: driver.mobileNumber,
+      driverPhone: presentPhone(driver.mobileNumber),
       assignedBy: "ADMIN",
     });
     emitToUser(userIdStr, "booking:accepted", {

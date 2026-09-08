@@ -1,5 +1,6 @@
 import mongoose, { Schema, Types } from "mongoose";
 import { IBooking } from "../interfaces/booking";
+import { TaxBreakdownSchema } from "./tax-breakdown.schema";
 
 // Location sub-schema
 const LocationSchema = new Schema(
@@ -11,6 +12,8 @@ const LocationSchema = new Schema(
     // pricing resolves on. Optional: older builds don't send it and the server
     // reverse-geocodes when a city rate card exists.
     city: String,
+    // State of the address — the GST place of supply for the pickup.
+    state: String,
     contactName: String,
     contactPhone: String,
     floor: Number,
@@ -176,6 +179,8 @@ const BookingSchema = new Schema<IBooking>(
     gstPercentage: { type: Number, default: 5 },
     gstin: { type: String, trim: true, uppercase: true },
     gstBusinessName: { type: String, trim: true },
+    // CGST+SGST / IGST split of gstAmount (see tax.service).
+    taxBreakdown: { type: TaxBreakdownSchema, default: undefined },
 
     // Final amounts
     subtotal: { type: Number, required: true },
@@ -288,8 +293,12 @@ const BookingSchema = new Schema<IBooking>(
     assignedAt: Date,
     driverArrivedAt: Date,
     pickedAt: Date,
+    // Trip started (goods aboard, driver left the pickup).
+    startedAt: Date,
     completedAt: Date,
     cancelledAt: Date,
+    // When dispatch last (re)started looking for a driver.
+    searchStartedAt: Date,
 
     // ETA
     estimatedArrivalTime: Number, // in minutes

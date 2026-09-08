@@ -2,6 +2,8 @@ import { FareConfig } from "../models/app-config.model";
 import VehicleType from "../models/vehicle-type.model";
 import { Types } from "mongoose";
 import { resolveRates, type EffectiveRates } from "./vehicle-rate.service";
+import { computeBookingTax } from "./tax.service";
+import type { ITaxBreakdown } from "../models/tax-breakdown.schema";
 
 export interface FareBreakdown {
   baseFare: number;
@@ -42,6 +44,8 @@ export interface FareBreakdown {
   rateCity?: string;
   /** The label of the surge window that applied, if any (for the receipt). */
   surgeLabel?: string;
+  /** CGST+SGST / IGST split of gstAmount, when a tax context was supplied. */
+  taxBreakdown?: ITaxBreakdown;
 }
 
 export interface FareCalculationInput {
@@ -56,6 +60,14 @@ export interface FareCalculationInput {
    * Selects the city rate card; null/undefined prices on the Default card.
    */
   city?: string | null;
+  /**
+   * Where the goods are handed over and who is billed — decides whether GST
+   * is CGST+SGST or IGST. Optional: quotes without it get a plain GST figure.
+   */
+  taxContext?: {
+    pickup?: { lat?: number | null; lng?: number | null; city?: string | null; state?: string | null } | null;
+    customerGstin?: string | null;
+  };
   addons?: {
     addonId: Types.ObjectId;
     price: number;
@@ -258,9 +270,23 @@ export const calculateFare = async (
     subtotal = minimumFare;
   }
 
-  // Calculate GST
+  // Calculate GST — and, when we know where the trip starts / who is billed,
+  // how it splits (CGST+SGST within the company's state, IGST otherwise).
   const gstAmount = (subtotal * gstPercentage) / 100;
   const totalWithGst = subtotal + gstAmount;
+  let taxBreakdown: ITaxBreakdown | undefined;
+  if (input.taxContext) {
+    try {
+      taxBreakdown = await computeBookingTax({
+        taxableAmount: Math.round(subtotal * 100) / 100,
+        gstPercentage,
+        pickup: input.taxContext.pickup,
+        customerGstin: input.taxContext.customerGstin,
+      });
+    } catch (e) {
+      console.warn("[fare] tax split failed, keeping flat GST:", (e as Error).message);
+    }
+  }
 
   // Calculate discounts
   const promoDiscount = input.promoDiscount || 0;
@@ -295,6 +321,7 @@ export const calculateFare = async (
     waitingChargePerMin: fareConfig?.waitingChargePerMin ?? 2,
     rateSource: rates.rateSource,
     rateCity: rates.rateCity,
+    taxBreakdown,
   };
 };
 

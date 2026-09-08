@@ -12,9 +12,23 @@ const router = Router();
 const { verifyUserToken } = AuthMiddleware();
 
 router.get(
+  "/quick-replies",
+  verifyUserToken,
+  ErrorHandlerMiddleware(ChatController.getQuickReplies),
+  ResponseMiddleware,
+);
+
+router.get(
   "/:bookingId/history",
   verifyUserToken,
   ErrorHandlerMiddleware(ChatController.getChatHistory),
+  ResponseMiddleware,
+);
+
+router.get(
+  "/:bookingId/unread",
+  verifyUserToken,
+  ErrorHandlerMiddleware(ChatController.getUnreadCount),
   ResponseMiddleware,
 );
 

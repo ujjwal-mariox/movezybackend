@@ -76,6 +76,9 @@ export type MessageKey =
   | "profile_fetched"
   | "profile_updated"
   | "unauthorized"
+  | "booking_not_active"
+  | "call_unavailable"
+  | "not_booking_party"
   | "invalid_amount"
   | "amount_below_minimum"
   | "bank_details_required"
@@ -254,6 +257,15 @@ export default function messages(lang: Lang = "en"): MessageMap {
     },
     unauthorized: {
       en: "Unauthorized access",
+    },
+    booking_not_active: {
+      en: "This booking is not in progress",
+    },
+    call_unavailable: {
+      en: "Calling is unavailable right now. Please use chat or contact support.",
+    },
+    not_booking_party: {
+      en: "You are not part of this booking",
     },
     invalid_amount: {
       en: "Please enter a valid amount",

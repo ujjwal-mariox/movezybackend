@@ -15,6 +15,8 @@ import { FAQ, Content } from "../models/content.model";
 import { Role } from "../models/role.model";
 import Badge from "../models/badge.model";
 import bcrypt from "bcryptjs";
+import { seedTaxJurisdictions } from "../models/tax-jurisdiction.model";
+import { seedChatQuickReplies } from "../models/chat-quick-reply.model";
 
 const seedDatabase = async () => {
   try {
@@ -553,7 +555,9 @@ const seedDatabase = async () => {
       {
         email: "admin@movezy.in",
         password: hashedPassword,
-        name: "Super Admin",
+        // fullName, not `name`: the Admin schema has no `name` path, so the
+        // seeded account rendered as "Unknown" in Staff Management.
+        fullName: "Super Admin",
         ...(superAdminRole ? { roleId: superAdminRole._id } : {}),
         // roleName, not `role`: the Admin schema has no `role` path, so the
         // old value was silently dropped and the super-admin bypass never
@@ -952,6 +956,14 @@ const seedDatabase = async () => {
       { upsert: true, new: true },
     );
     console.log("✅ App Config seeded");
+
+    // GST state codes (data the tax split reads — never hardcoded at runtime)
+    const jurisdictionsAdded = await seedTaxJurisdictions();
+    console.log(`✅ Tax jurisdictions seeded (${jurisdictionsAdded} added)`);
+
+    // Predefined chat lines for drivers and customers
+    const repliesAdded = await seedChatQuickReplies();
+    console.log(`✅ Chat quick replies seeded (${repliesAdded} added)`);
 
     console.log("✅ Database seeding completed successfully!");
     process.exit(0);

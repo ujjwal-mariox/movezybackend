@@ -1505,3 +1505,85 @@ export const getPublicSupportContact = async (_req: Request, res: Response) => {
     data: { supportPhone: (doc as any)?.value ? String((doc as any).value) : "" },
   });
 };
+
+// ─────────────────────────── Tax identity (GST split) ───────────────────────────
+//
+// The automated CGST/SGST vs IGST split compares the place of supply with the
+// company's state. Both sides are settings/data, never constants:
+//   COMPANY_GSTIN  — supplier state = first two digits
+//   COMPANY_STATE  — used only when there is no GSTIN
+//   TaxJurisdiction rows — the state-code table (seeded, editable)
+const TAX_KEYS = {
+  companyGstin: "COMPANY_GSTIN",
+  companyState: "COMPANY_STATE",
+  companyLegalName: "COMPANY_LEGAL_NAME",
+  companyAddress: "COMPANY_ADDRESS",
+} as const;
+const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+
+export const getTaxSettings = async (_req: Request, res: Response) => {
+  const TaxJurisdiction = (await import("../../models/tax-jurisdiction.model")).default;
+  const rows = await AppConfig.find({ key: { $in: Object.values(TAX_KEYS) } })
+    .select("key value")
+    .lean();
+  const byKey: Record<string, string> = {};
+  for (const r of rows as any[]) byKey[r.key] = r.value ? String(r.value) : "";
+  const jurisdictions = await TaxJurisdiction.find({}).sort({ code: 1 }).lean();
+  res.locals.data = {
+    companyGstin: byKey.COMPANY_GSTIN === "GSTIN-NOT-SET" ? "" : byKey.COMPANY_GSTIN || "",
+    companyState: byKey.COMPANY_STATE || "",
+    companyLegalName: byKey.COMPANY_LEGAL_NAME || "",
+    companyAddress: byKey.COMPANY_ADDRESS || "",
+    jurisdictions,
+  };
+};
+
+export const updateTaxSettings = async (req: Request, res: Response) => {
+  const TaxJurisdiction = (await import("../../models/tax-jurisdiction.model")).default;
+  const gstin = String(req.body?.companyGstin || "").trim().toUpperCase();
+  const stateName = String(req.body?.companyState || "").trim();
+  if (gstin && !GSTIN_RE.test(gstin)) {
+    return res.status(400).json({ success: false, message: "Enter a valid 15-character GSTIN, or leave it blank." });
+  }
+  if (gstin) {
+    const j = await TaxJurisdiction.findOne({ code: gstin.slice(0, 2) }).lean();
+    if (!j) {
+      return res.status(400).json({ success: false, message: `GSTIN state code ${gstin.slice(0, 2)} is not a known jurisdiction.` });
+    }
+  }
+  if (!gstin && !stateName) {
+    return res.status(400).json({ success: false, message: "Set the company GSTIN or the company state." });
+  }
+  const values: Record<string, string> = {
+    [TAX_KEYS.companyGstin]: gstin,
+    [TAX_KEYS.companyState]: stateName,
+    [TAX_KEYS.companyLegalName]: String(req.body?.companyLegalName || "").trim(),
+    [TAX_KEYS.companyAddress]: String(req.body?.companyAddress || "").trim(),
+  };
+  for (const [key, value] of Object.entries(values)) {
+    await AppConfig.findOneAndUpdate(
+      { key },
+      { key, value, type: "STRING", category: "TAX", description: "Company tax identity used for GST split and invoices", isEditable: true },
+      { upsert: true, new: true },
+    );
+  }
+  const { invalidateJurisdictionCache } = await import("../../services/tax.service");
+  invalidateJurisdictionCache();
+  res.locals.data = values;
+  res.locals.message = "Tax settings saved.";
+};
+
+export const updateTaxJurisdiction = async (req: Request, res: Response) => {
+  const TaxJurisdiction = (await import("../../models/tax-jurisdiction.model")).default;
+  const code = String(req.params.code || "").trim();
+  const patch: Record<string, unknown> = {};
+  if (typeof req.body?.isActive === "boolean") patch.isActive = req.body.isActive;
+  if (Array.isArray(req.body?.aliases)) {
+    patch.aliases = req.body.aliases.map((a: unknown) => String(a).trim().toLowerCase()).filter(Boolean);
+  }
+  const row = await TaxJurisdiction.findOneAndUpdate({ code }, { $set: patch }, { new: true }).lean();
+  if (!row) return res.status(404).json({ success: false, message: "Jurisdiction not found" });
+  const { invalidateJurisdictionCache } = await import("../../services/tax.service");
+  invalidateJurisdictionCache();
+  res.locals.data = { jurisdiction: row };
+};

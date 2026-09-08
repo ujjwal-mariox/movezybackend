@@ -18,6 +18,34 @@ interface AuthenticatedSocket extends Socket {
 
 let io: Server | null = null;
 
+const ACTIVE_TRIP_STATUSES = ["ASSIGNED", "DRIVER_ARRIVED", "PICKED", "IN_PROGRESS"];
+
+/**
+ * Which side of a booking this socket is. null = not a party (admins pass
+ * with no counterpart). Chat rooms and history are gated on this — before,
+ * any authenticated socket could join any booking's room.
+ */
+const chatParty = async (
+  bookingId: string,
+  userId: string,
+  userType?: string,
+): Promise<{ otherId: string | null } | null> => {
+  try {
+    if (!Types.ObjectId.isValid(bookingId)) return null;
+    const Booking = (await import("../models/booking.model")).default;
+    const b: any = await Booking.findById(bookingId).select("userId driverId").lean();
+    if (!b) return null;
+    const uid = String(b.userId || "");
+    const did = String(b.driverId || "");
+    if (userType === "ADMIN") return { otherId: null };
+    if (userType === "DRIVER" && did === userId) return { otherId: uid || null };
+    if (userType === "USER" && uid === userId) return { otherId: did || null };
+    return null;
+  } catch {
+    return null;
+  }
+};
+
 /**
  * Initialize Socket.io with Redis adapter for scaling
  */
@@ -29,7 +57,9 @@ export const initSocket = async (httpServer: HttpServer): Promise<Server> => {
       credentials: true,
     },
     pingInterval: 25000,
-    pingTimeout: 5000,
+    // A locked phone can miss a ping or two; presence is heartbeat-based now,
+    // so a slow pong must not be treated as "gone".
+    pingTimeout: 20000,
     transports: ["websocket", "polling"],
   });
 
@@ -104,6 +134,34 @@ export const initSocket = async (httpServer: HttpServer): Promise<Server> => {
     if (socket.userId) {
       socket.join(`user:${socket.userId}`);
 
+      // Rooms for whatever trip is in progress, so chat and status events reach
+      // the app-level socket without the trip screen being open; and a driver
+      // connecting is itself a heartbeat.
+      (async () => {
+        try {
+          const Booking = (await import("../models/booking.model")).default;
+          const filter =
+            socket.userType === "DRIVER"
+              ? { driverId: new Types.ObjectId(socket.userId), status: { $in: ACTIVE_TRIP_STATUSES } }
+              : socket.userType === "USER"
+                ? {
+                    userId: new Types.ObjectId(socket.userId),
+                    status: { $in: [...ACTIVE_TRIP_STATUSES, "SEARCHING", "PENDING"] },
+                  }
+                : null;
+          if (filter) {
+            const rows = await Booking.find(filter).select("_id").limit(5).lean();
+            for (const b of rows) socket.join(`booking:${String(b._id)}`);
+          }
+          if (socket.userType === "DRIVER") {
+            const { recordHeartbeat } = await import("../services/presence.service");
+            await recordHeartbeat(socket.userId!, { source: "socket-connect" });
+          }
+        } catch (e: any) {
+          console.error("socket room/presence setup failed:", e?.message);
+        }
+      })();
+
       // Admins listen for platform-wide alerts (sos:new is emitted to "admin").
       if (socket.userType === "ADMIN") {
         socket.join("admin");
@@ -177,6 +235,11 @@ export const initSocket = async (httpServer: HttpServer): Promise<Server> => {
       } catch (error) {
         console.error("Error updating driver location:", error);
       }
+
+      // A location report is a heartbeat: keeps the driver online.
+      import("../services/presence.service")
+        .then((m) => m.recordHeartbeat(socket.userId!, { source: "socket-location" }))
+        .catch(() => {});
 
       // Also persist to Mongo DriverLocation — the user home map
       // (/tracking/nearby-drivers) and the admin live map read from this
@@ -264,6 +327,12 @@ export const initSocket = async (httpServer: HttpServer): Promise<Server> => {
 
       if (!bookingId || !socket.userId) return;
 
+      const party = await chatParty(bookingId, socket.userId, socket.userType);
+      if (!party) {
+        socket.emit("chat:error", { message: "You are not part of this booking" });
+        return;
+      }
+
       try {
         // Save to database
         const chatMsg = await ChatMessage.create({
@@ -288,6 +357,18 @@ export const initSocket = async (httpServer: HttpServer): Promise<Server> => {
 
         // Broadcast to everyone in the booking room (including sender for confirmation)
         io!.to(`booking:${bookingId}`).emit("chat:message", payload);
+
+        // App-level nudge for the other party — badge / notification even with
+        // their chat screen closed. The message itself travels on the room.
+        if (party.otherId) {
+          io!.to(`user:${party.otherId}`).emit("chat:notify", {
+            bookingId,
+            messageId: String(chatMsg._id),
+            from: chatMsg.senderType,
+            preview: chatMsg.messageType === "IMAGE" ? "📷 Photo" : String(chatMsg.message || "").slice(0, 120),
+            createdAt: payload.createdAt,
+          });
+        }
       } catch (error) {
         console.error("Error saving chat message:", error);
         socket.emit("chat:error", { message: "Failed to send message" });
@@ -295,12 +376,15 @@ export const initSocket = async (httpServer: HttpServer): Promise<Server> => {
     });
 
     // Join chat room
-    socket.on("chat:join", (data) => {
-      const { bookingId } = data;
-      if (bookingId) {
-        socket.join(`booking:${bookingId}`);
-        console.log(`${socket.userId} joined chat:booking:${bookingId}`);
+    socket.on("chat:join", async (data) => {
+      const { bookingId } = data || {};
+      if (!bookingId || !socket.userId) return;
+      const party = await chatParty(bookingId, socket.userId, socket.userType);
+      if (!party) {
+        socket.emit("chat:error", { message: "You are not part of this booking" });
+        return;
       }
+      socket.join(`booking:${bookingId}`);
     });
 
     // Leave chat room
@@ -342,18 +426,14 @@ export const initSocket = async (httpServer: HttpServer): Promise<Server> => {
           const remaining = await io!.in(`user:${socket.userId}`).fetchSockets();
           if (remaining.length > 0) return; // other sockets still live — stay online
 
-          const redis = getRedisClient();
-          await redis.zRem("driver:locations", socket.userId);
-
-          // Mark them offline too. Dropping the geo entry without this left
-          // Driver.isOnline stuck at true: the app kept showing "Online" while
-          // dispatch could no longer see them, so the driver sat waiting for
-          // requests that could never arrive. A backend restart or a network
-          // blip put every on-shift driver into that state silently.
+          // Last socket gone. The driver is NOT flipped offline here: a locked
+          // phone drops its socket within seconds while the foreground service
+          // keeps heartbeating. presence.service sweeps drivers offline only
+          // after DRIVER_OFFLINE_GRACE_MS without any heartbeat.
           const DriverModel = (await import("../models/driver.model")).default;
           await DriverModel.updateOne(
             { _id: socket.userId },
-            { $set: { isOnline: false } },
+            { $set: { lastSocketDisconnectAt: new Date() } },
           );
         } catch (error) {
           console.error("Error removing driver on disconnect:", error);

@@ -122,9 +122,11 @@ export const generateInvoice = async (
     coinDiscount: booking.coinDiscount || 0,
     enterpriseDiscount: booking.enterpriseDiscount || 0,
 
-    // Taxes
+    // Taxes — the stored rate (0 when a legacy booking has none; never a guessed 5%)
     gstAmount: booking.gstAmount || 0,
-    gstPercentage: booking.gstPercentage || 5,
+    gstPercentage: booking.gstPercentage ?? 0,
+    // CGST+SGST / IGST as charged on the booking.
+    taxBreakdown: (booking as any).taxBreakdown || undefined,
 
     // Totals
     subtotal: booking.subtotal || booking.fare,
@@ -133,6 +135,7 @@ export const generateInvoice = async (
     grandTotal: booking.finalFare,
 
     // GST Details
+    customerGstin: booking.gstin || undefined,
     companyGstin,
 
     status: booking.paymentStatus === "PAID" ? "PAID" : "GENERATED",

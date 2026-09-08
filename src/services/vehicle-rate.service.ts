@@ -233,3 +233,46 @@ export const resolveBookingCity = async (
   if (!(await anyCityOverridesConfigured())) return null;
   return resolveCityFromCoords(Number(pickup?.lat), Number(pickup?.lng));
 };
+
+/**
+ * State name for a coordinate (Nominatim `address.state`), cached per 0.01°
+ * cell like the city lookup. Used by the GST split when the app did not send
+ * the pickup state.
+ */
+export const resolveStateFromCoords = async (
+  lat: number,
+  lng: number,
+): Promise<string | null> => {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (lat === 0 && lng === 0) return null;
+
+  const key = `geo:state:${lat.toFixed(2)}:${lng.toFixed(2)}`;
+  const cached = await cache.get<string>(key);
+  if (cached) return cached === "-" ? null : cached;
+
+  try {
+    const url =
+      `https://nominatim.openstreetmap.org/reverse?format=jsonv2` +
+      `&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}` +
+      `&zoom=8&addressdetails=1`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Movezy/1.0 (tax place-of-supply resolver)",
+        "Accept-Language": "en",
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) throw new Error(`nominatim ${res.status}`);
+    const body: any = await res.json();
+    const state: string | null = body?.address?.state || body?.address?.state_district || null;
+    await cache.set(key, state || "-", 30 * 24 * 3600);
+    return state;
+  } catch (err) {
+    console.warn("[vehicle-rate] state reverse geocode failed:", (err as Error).message);
+    await cache.set(key, "-", 3600);
+    return null;
+  }
+};

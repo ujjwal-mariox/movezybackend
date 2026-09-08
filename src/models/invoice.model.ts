@@ -1,4 +1,5 @@
 import mongoose, { Schema, Types } from "mongoose";
+import { TaxBreakdownSchema, type ITaxBreakdown } from "./tax-breakdown.schema";
 
 export interface IInvoice {
   _id: Types.ObjectId;
@@ -26,6 +27,8 @@ export interface IInvoice {
   // Taxes
   gstAmount: number;
   gstPercentage: number;
+  /** CGST+SGST / IGST split as charged; absent on invoices from before the split. */
+  taxBreakdown?: ITaxBreakdown;
 
   // Totals
   subtotal: number;
@@ -97,6 +100,7 @@ const InvoiceSchema = new Schema<IInvoice>(
     // Taxes
     gstAmount: { type: Number, required: true, min: 0 },
     gstPercentage: { type: Number, required: true, min: 0 },
+    taxBreakdown: { type: TaxBreakdownSchema, default: undefined },
 
     // Totals
     subtotal: { type: Number, required: true, min: 0 },

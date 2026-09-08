@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { Types } from "mongoose";
 import bcrypt from "bcryptjs";
 import { Admin } from "../../models/admin.model";
 import {
@@ -26,38 +27,54 @@ export const getAllStaff = async (req: Request, res: Response) => {
     sortOrder = "desc",
   } = req.query;
 
-  const query: any = { isDeleted: false };
+  // The admin used to send `search=undefined&role=undefined` on first load
+  // (URLSearchParams stringifies missing values), which became a regex for
+  // the word "undefined" and matched nobody — the staff list looked empty
+  // while the role cards still counted members. Treat those as absent, and
+  // accept `role` as well as `roleId`.
+  const clean = (v: unknown): string | undefined =>
+    v === undefined || v === null || v === "" || v === "undefined" || v === "null"
+      ? undefined
+      : String(v);
+  const searchQ = clean(search);
+  const roleQ = clean(roleId) ?? clean((req.query as any).role);
+  const statusQ = clean(status);
+
+  const query: any = { isDeleted: { $ne: true } };
 
   // Search by name, email, or phone
-  if (search) {
+  if (searchQ) {
+    const safe = searchQ.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     query.$or = [
-      { fullName: { $regex: search, $options: "i" } },
-      { email: { $regex: search, $options: "i" } },
-      { phone: { $regex: search, $options: "i" } },
+      { fullName: { $regex: safe, $options: "i" } },
+      { email: { $regex: safe, $options: "i" } },
+      { phone: { $regex: safe, $options: "i" } },
     ];
   }
 
   // Filter by role
-  if (roleId) {
-    query.roleId = roleId;
+  if (roleQ && Types.ObjectId.isValid(roleQ)) {
+    query.roleId = new Types.ObjectId(roleQ);
   }
 
   // Filter by status
-  if (status === "active") {
+  if (statusQ === "active") {
     query.isActive = true;
-  } else if (status === "inactive") {
+  } else if (statusQ === "inactive") {
     query.isActive = false;
   }
 
   const skip = (Number(page) - 1) * Number(limit);
   const sortDirection = sortOrder === "asc" ? 1 : -1;
+  const SORTABLE = new Set(["createdAt", "fullName", "email", "roleName", "isActive", "lastLoginAt"]);
+  const sortKey = SORTABLE.has(String(sortBy)) ? String(sortBy) : "createdAt";
 
   const [staff, total] = await Promise.all([
     Admin.find(query)
       .select("-password -resetPasswordToken -resetPasswordExpires")
       .populate("roleId", "name description permissions")
       .populate("createdBy", "fullName email")
-      .sort({ [sortBy as string]: sortDirection })
+      .sort({ [sortKey]: sortDirection })
       .skip(skip)
       .limit(Number(limit)),
     Admin.countDocuments(query),

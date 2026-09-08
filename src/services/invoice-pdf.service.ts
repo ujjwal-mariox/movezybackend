@@ -141,6 +141,12 @@ export const renderInvoicePdf = async ({
   if (invoice.customerGstin) doc.text(`GSTIN: ${invoice.customerGstin}`);
   doc.moveDown(0.5);
   doc.text(`Company GSTIN: ${invoice.companyGstin}`);
+  const split: any = (invoice as any).taxBreakdown;
+  if (split?.placeOfSupplyCode) {
+    doc.text(
+      `Place of supply: ${split.placeOfSupplyName ? `${split.placeOfSupplyName} ` : ""}(${split.placeOfSupplyCode})`,
+    );
+  }
   doc.moveDown(0.8);
 
   // Trip
@@ -192,8 +198,15 @@ export const renderInvoicePdf = async ({
       .forEach(([label, amount]) => row(doc, label, amount, { negative: true }));
   }
 
-  if (Number(invoice.totalTax) > 0) {
-    row(doc, `GST (${invoice.gstPercentage || 5}%)`, invoice.totalTax);
+  // Tax lines as charged: CGST+SGST within the company's state, IGST across
+  // states, plain GST when the place of supply could not be established.
+  if (split && split.supplyType === "INTRA_STATE") {
+    row(doc, `CGST (${split.cgstRate}%)`, split.cgstAmount);
+    row(doc, `SGST (${split.sgstRate}%)`, split.sgstAmount);
+  } else if (split && split.supplyType === "INTER_STATE") {
+    row(doc, `IGST (${split.igstRate}%)`, split.igstAmount);
+  } else if (Number(invoice.totalTax) > 0) {
+    row(doc, `GST (${invoice.gstPercentage ?? 0}%)`, invoice.totalTax);
   }
 
   doc.moveDown(0.3);

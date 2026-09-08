@@ -737,6 +737,29 @@ adminRouter.put(
   ResponseMiddleware,
 );
 
+// Tax identity for the automated CGST/SGST vs IGST split
+adminRouter.get(
+  "/config/tax",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SETTINGS_VIEW),
+  ErrorHandlerMiddleware(ConfigController.getTaxSettings),
+  ResponseMiddleware,
+);
+adminRouter.put(
+  "/config/tax",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SETTINGS_UPDATE),
+  ErrorHandlerMiddleware(ConfigController.updateTaxSettings),
+  ResponseMiddleware,
+);
+adminRouter.put(
+  "/config/tax/jurisdictions/:code",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SETTINGS_UPDATE),
+  ErrorHandlerMiddleware(ConfigController.updateTaxJurisdiction),
+  ResponseMiddleware,
+);
+
 adminRouter.get(
   "/config/vehicle-types",
   verifyAdminToken,

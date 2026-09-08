@@ -107,6 +107,11 @@ const DriverSchema = new Schema<IDriver>(
       default: false,
       index: true,
     },
+    // Presence: last sign of life (socket connect, location update or the
+    // foreground service's heartbeat). presence.service sweeps drivers
+    // offline only after DRIVER_OFFLINE_GRACE_MS without one.
+    lastHeartbeatAt: { type: Date, index: true },
+    lastSocketDisconnectAt: Date,
     isDeleted: {
       type: Boolean,
       default: false,

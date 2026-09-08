@@ -6,6 +6,8 @@ import DispatchOffer from "../models/dispatch-offer.model";
 import * as notificationService from "../services/notification.service";
 import * as DriverPayoutService from "../services/driver-payout.service";
 import { runAutoAssignSweep } from "../services/auto-assign.service";
+import * as BookingDispatchService from "../services/booking-dispatch.service";
+import { sweepStaleDrivers } from "../services/presence.service";
 
 /**
  * General scheduled-jobs layer.
@@ -25,7 +27,10 @@ import { runAutoAssignSweep } from "../services/auto-assign.service";
  */
 
 const TICK_MS = 5 * 60 * 1000;
+/** Fast lane for things measured in seconds: offer windows, stalled searches, presence. */
+const FAST_TICK_MS = 30 * 1000;
 let interval: NodeJS.Timeout | null = null;
+let fastInterval: NodeJS.Timeout | null = null;
 
 const getConfig = async (key: string): Promise<any> => {
   const doc: any = await AppConfig.findOne({ key }).lean();
@@ -54,10 +59,30 @@ const markRan = (jobKey: string) =>
 
 /** Lapse dispatch offers whose window has passed. */
 const expireOffers = async (): Promise<void> => {
+  // Lapsing an offer must also move the booking to the next driver, so this
+  // delegates to dispatch instead of flipping rows on its own.
+  await BookingDispatchService.sweepExpiredOffers();
   await DispatchOffer.updateMany(
-    { response: "PENDING", expiresAt: { $lt: new Date() } },
+    { response: "PENDING", expiresAt: { $lt: new Date(Date.now() - 60_000) } },
     { $set: { response: "EXPIRED", respondedAt: new Date() } },
   );
+};
+
+const runFastJobs = async (): Promise<void> => {
+  const master = await getConfig("job_scheduler_enabled");
+  if (master === false || master === "false") return;
+  const steps: Array<[string, () => Promise<unknown>]> = [
+    ["sweep-offers", () => BookingDispatchService.sweepExpiredOffers()],
+    ["retry-searches", () => BookingDispatchService.retryStalledSearches()],
+    ["presence-sweep", () => sweepStaleDrivers()],
+  ];
+  for (const [name, run] of steps) {
+    try {
+      await run();
+    } catch (e) {
+      console.error(`[scheduler] fast job ${name} failed`, e);
+    }
+  }
 };
 
 /**
@@ -222,6 +247,9 @@ export const startJobScheduler = (): void => {
   interval = setInterval(() => {
     runDueJobs().catch((e) => console.error("[scheduler] tick failed", e));
   }, TICK_MS);
+  fastInterval = setInterval(() => {
+    runFastJobs().catch((e) => console.error("[scheduler] fast tick failed", e));
+  }, FAST_TICK_MS);
   // First pass shortly after boot so restarts don't delay due work a full tick.
   setTimeout(() => {
     runDueJobs().catch((e) => console.error("[scheduler] first run failed", e));
@@ -232,4 +260,6 @@ export const startJobScheduler = (): void => {
 export const stopJobScheduler = (): void => {
   if (interval) clearInterval(interval);
   interval = null;
+  if (fastInterval) clearInterval(fastInterval);
+  fastInterval = null;
 };

@@ -1,4 +1,5 @@
 import { Types } from "mongoose";
+import { presentPhone } from "./call-masking.service";
 import DriverLocation from "../models/driver-location.model";
 import Booking from "../models/booking.model";
 import Driver from "../models/driver.model";
@@ -164,7 +165,11 @@ export const getBookingTracking = async (
       drop: booking.drop,
       stops: booking.stops,
     },
-    driver: booking.driverId,
+    driver: (() => {
+      const d: any = booking.driverId;
+      if (d && typeof d === "object" && d.mobileNumber) d.mobileNumber = presentPhone(d.mobileNumber);
+      return d;
+    })(),
     vehicleType: booking.vehicleTypeId,
     driverLocation,
     eta,

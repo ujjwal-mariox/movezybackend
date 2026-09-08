@@ -37,6 +37,8 @@ import { cache } from "../utils/redis.util";
 import Payout from "../models/payout.model";
 import * as DriverPayoutService from "../services/driver-payout.service";
 import * as VehicleLifecycle from "../services/vehicle-lifecycle.service";
+import { presentPhone } from "../services/call-masking.service";
+import { computeBookingTax } from "../services/tax.service";
 
 const DEFAULT_JOINING_FEE = 999;
 
@@ -1333,6 +1335,11 @@ export const getBookingHistory = async (
       .skip((Number(page) - 1) * Number(limit))
       .limit(Number(limit))
       .lean();
+    for (const b of bookings as any[]) {
+      for (const loc of [b?.pickup, b?.drop, ...(Array.isArray(b?.stops) ? b.stops : [])]) {
+        if (loc?.contactPhone) loc.contactPhone = presentPhone(loc.contactPhone);
+      }
+    }
 
     const total = await BookingModel.countDocuments(query);
 
@@ -1631,10 +1638,21 @@ export const verifyPickupOtp = async (
       // separate top-up/refund flow rather than a silent fare change.
       if (waitingCharge > 0 && booking.paymentStatus !== "PAID") {
         const round2 = (n: number) => Math.round(n * 100) / 100;
-        const gstPercentage = booking.gstPercentage || 5;
+        // The stored rate, never a guessed one (older bookings carry the schema default).
+        const gstPercentage = booking.gstPercentage ?? 0;
 
         booking.subtotal = round2((booking.subtotal || 0) + waitingCharge);
         booking.gstAmount = round2((booking.subtotal * gstPercentage) / 100);
+        try {
+          booking.taxBreakdown = await computeBookingTax({
+            taxableAmount: booking.subtotal,
+            gstPercentage,
+            pickup: (booking as any).pickup,
+            customerGstin: booking.gstin,
+          });
+        } catch (e) {
+          console.warn("[driver] tax split recompute failed:", (e as Error).message);
+        }
         booking.finalFare = round2(
           Math.max(
             0,
@@ -1683,7 +1701,7 @@ export const startTrip = async (
         driverId: new Types.ObjectId(driverId),
         status: "PICKED",
       },
-      { status: "IN_PROGRESS" },
+      { status: "IN_PROGRESS", startedAt: new Date() },
       { new: true },
     );
 
@@ -2123,6 +2141,15 @@ export const getBookingDetails = async (
     // itself, for the same reason the pickup OTP is stripped above.
     (booking as any).deliveryOtpRequired = Boolean((booking as any).deliveryOtp);
     delete (booking as any).deliveryOtp;
+
+    // Numbers are shown masked; calls go through POST /bookings/:id/call so
+    // neither party ever sees the other's real number.
+    if ((booking as any).userId && typeof (booking as any).userId === "object") {
+      (booking as any).userId.mobileNumber = presentPhone((booking as any).userId.mobileNumber);
+    }
+    for (const loc of [(booking as any).pickup, (booking as any).drop, ...((booking as any).stops || [])]) {
+      if (loc?.contactPhone) loc.contactPhone = presentPhone(loc.contactPhone);
+    }
 
     req.rData = scrubOtps((booking as any).toObject?.() ?? booking);
     req.msg = "booking_fetched";
@@ -2640,7 +2667,19 @@ export const updateVehicle = async (
   try {
     const driverId = (req as any).driverId;
     const { vehicleId } = req.params;
-    const updateData = req.body;
+    // Only cosmetic fields may change here. Type, activation and ownership
+    // are derived from the RC record and admin approval
+    // (vehicle-lifecycle.service); a partner could previously PUT
+    // {"vehicleTypeId": ..., "isActive": true} and receive jobs for a
+    // category they never registered.
+    const {
+      vehicleTypeId: _type,
+      isActive: _active,
+      isDeleted: _deleted,
+      driverId: _owner,
+      registrationNumber: _reg,
+      ...updateData
+    } = (req.body || {}) as Record<string, unknown>;
 
     const vehicle = await DriverVehicleModel.findOneAndUpdate(
       { _id: vehicleId, driverId: new Types.ObjectId(driverId) },
@@ -2724,7 +2763,7 @@ function mapDashboardBooking(booking: any, commissionPercent = 20) {
       lat: Number(booking?.pickup?.lat || 0),
       lng: Number(booking?.pickup?.lng || 0),
       contactName: booking?.pickup?.contactName || "",
-      contactPhone: booking?.pickup?.contactPhone || "",
+      contactPhone: presentPhone(booking?.pickup?.contactPhone),
       floor: booking?.pickup?.floor ?? null,
       isLiftAvailable: booking?.pickup?.isLiftAvailable ?? null,
     },
@@ -2733,7 +2772,7 @@ function mapDashboardBooking(booking: any, commissionPercent = 20) {
       lat: Number(booking?.drop?.lat || 0),
       lng: Number(booking?.drop?.lng || 0),
       contactName: booking?.drop?.contactName || "",
-      contactPhone: booking?.drop?.contactPhone || "",
+      contactPhone: presentPhone(booking?.drop?.contactPhone),
       floor: booking?.drop?.floor ?? null,
       isLiftAvailable: booking?.drop?.isLiftAvailable ?? null,
     },
@@ -2746,7 +2785,7 @@ function mapDashboardBooking(booking: any, commissionPercent = 20) {
         lat: Number(s?.lat || 0),
         lng: Number(s?.lng || 0),
         contactName: s?.contactName || "",
-        contactPhone: s?.contactPhone || "",
+        contactPhone: presentPhone(s?.contactPhone),
         floor: s?.floor ?? null,
         completedAt: s?.completedAt ?? null,
       }),
@@ -2798,20 +2837,37 @@ export const setActiveVehicle = async (
     const driverId = (req as any).driverId;
     const { vehicleId } = req.params;
 
-    // Deactivate all vehicles
-    await DriverVehicleModel.updateMany(
-      { driverId: new Types.ObjectId(driverId) },
-      { isActive: false },
-    );
-
-    // Activate selected vehicle
-    const vehicle = await DriverVehicleModel.findOneAndUpdate(
-      { _id: vehicleId, driverId: new Types.ObjectId(driverId) },
-      { isActive: true },
-      { new: true },
-    );
-
-    req.rData = vehicle;
+    // Legacy route: activation is owned by vehicle-lifecycle (approved,
+    // fee-paid, documents valid, not mid-trip). Resolve the dispatch row to
+    // its vehicle record and apply the same rule as /my-vehicles/:id/activate.
+    const row = await DriverVehicleModel.findOne({
+      _id: vehicleId,
+      driverId: new Types.ObjectId(driverId),
+    }).lean();
+    if (!row) {
+      req.rCode = 0;
+      req.msg = "vehicle_not_found";
+      return next();
+    }
+    const vehicleDoc = await VehicleModel.findOne({
+      driverId: new Types.ObjectId(driverId),
+      vehicleNumber: VehicleLifecycle.normalizeVehicleNumber(String(row.registrationNumber || "")),
+      isDeleted: { $ne: true },
+    })
+      .select("_id")
+      .lean();
+    if (!vehicleDoc) {
+      req.rCode = 0;
+      req.msg = "vehicle_not_approved";
+      return next();
+    }
+    const result = await VehicleLifecycle.setActiveVehicle(driverId, vehicleDoc._id as Types.ObjectId);
+    if (!result.ok) {
+      req.rCode = 0;
+      req.msg = result.msg as any;
+      return next();
+    }
+    req.rData = result.vehicle;
     req.msg = "vehicle_activated";
     next();
   } catch (error) {

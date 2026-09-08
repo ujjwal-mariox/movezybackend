@@ -4,6 +4,8 @@ import ErrorHandlerMiddleware from "../middlewares/error-handler.middleware";
 import ResponseMiddleware from "../middlewares/response.middleware";
 import * as DriverController from "../controllers/driver.controller";
 import * as ChatController from "../controllers/chat.controller";
+import * as DriverPresenceController from "../controllers/driver-presence.controller";
+import * as CallController from "../controllers/call.controller";
 import upload from "../middlewares/upload.middleware";
 
 const driverRouter = Router();
@@ -256,6 +258,14 @@ driverRouter.post(
 driverRouter.post(
   "/location",
   ErrorHandlerMiddleware(DriverController.updateLocation),
+  ResponseMiddleware,
+);
+
+// Presence heartbeat — sent by the app's foreground service every minute so a
+// locked phone stays online (see presence.service).
+driverRouter.post(
+  "/heartbeat",
+  ErrorHandlerMiddleware(DriverPresenceController.heartbeat),
   ResponseMiddleware,
 );
 
@@ -654,6 +664,27 @@ driverRouter.post(
 // =====================
 // CHAT
 // =====================
+
+// Predefined chat lines for drivers
+driverRouter.get(
+  "/chat/quick-replies",
+  ErrorHandlerMiddleware(ChatController.getQuickReplies),
+  ResponseMiddleware,
+);
+
+// Unread messages from the customer on a booking
+driverRouter.get(
+  "/chat/:bookingId/unread",
+  ErrorHandlerMiddleware(ChatController.getUnreadCount),
+  ResponseMiddleware,
+);
+
+// Masked call to the customer (server-bridged; numbers never leave the server)
+driverRouter.post(
+  "/bookings/:bookingId/call",
+  ErrorHandlerMiddleware(CallController.driverCallCustomer),
+  ResponseMiddleware,
+);
 
 // Get chat history for a booking
 driverRouter.get(
