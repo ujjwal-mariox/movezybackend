@@ -3,7 +3,6 @@ import * as FareService from "../../services/fare.service";
 import {
   FareConfig,
   AppConfig,
-  ServiceArea,
 } from "../../models/app-config.model";
 import VehicleType from "../../models/vehicle-type.model";
 
@@ -150,6 +149,7 @@ const cleanSurgeWindows = (rows: unknown): any[] | undefined => {
       startHour: Number(w?.startHour),
       endHour: Number(w?.endHour),
       multiplier: Number(w?.multiplier),
+      cities: (Array.isArray(w?.cities) ? w.cities : []).map((c: unknown) => String(c || "").trim()).filter(Boolean),
     }))
     .filter(
       (w) =>
@@ -894,7 +894,9 @@ export const deleteCancellationReason = async (req: Request, res: Response) => {
  * Get time slots
  */
 export const getTimeSlots = async (req: Request, res: Response) => {
-  const slots = await TimeSlot.find({ isActive: true }).sort({ sortOrder: 1 });
+  // Admin editor asks for everything (?all=true); the default stays the live list.
+  const includeAll = String(req.query.all || "") === "true";
+  const slots = await TimeSlot.find(includeAll ? {} : { isActive: true }).sort({ sortOrder: 1, startTime: 1 });
   const scheduleConfig = await ScheduleConfig.findOne();
 
   res.locals.data = {
@@ -920,6 +922,60 @@ export const updateScheduleConfig = async (req: Request, res: Response) => {
     message: "Schedule config updated",
     config,
   };
+};
+
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const cleanSlot = (body: any, partial = false) => {
+  const out: Record<string, unknown> = {};
+  if (!partial || body.label !== undefined) {
+    const label = String(body.label || "").trim();
+    if (!label) throw Object.assign(new Error("label is required"), { status: 400 });
+    out.label = label;
+  }
+  if (!partial || body.startTime !== undefined || body.endTime !== undefined) {
+    const start = String(body.startTime || "");
+    const end = String(body.endTime || "");
+    if (!TIME_RE.test(start) || !TIME_RE.test(end)) throw Object.assign(new Error("startTime/endTime must be HH:MM"), { status: 400 });
+    if (start >= end) throw Object.assign(new Error("endTime must be after startTime"), { status: 400 });
+    out.startTime = start;
+    out.endTime = end;
+  }
+  if (body.maxBookings !== undefined) out.maxBookings = Math.max(1, Number(body.maxBookings) || 100);
+  if (body.surgeMultiplier !== undefined) out.surgeMultiplier = Math.max(1, Number(body.surgeMultiplier) || 1);
+  if (body.sortOrder !== undefined) out.sortOrder = Number(body.sortOrder) || 0;
+  if (typeof body.isActive === "boolean") out.isActive = body.isActive;
+  return out;
+};
+
+export const createTimeSlot = async (req: Request, res: Response) => {
+  try {
+    const slot = await TimeSlot.create(cleanSlot(req.body));
+    res.locals.data = { message: "Time slot created", slot };
+  } catch (e: any) {
+    if (e?.status === 400) { res.status(400); }
+    throw e;
+  }
+};
+
+export const updateTimeSlot = async (req: Request, res: Response) => {
+  let patch: Record<string, unknown>;
+  try {
+    // A partial update must still validate a changed window as a pair.
+    const merged = { ...(await TimeSlot.findById(req.params.id).lean()), ...req.body };
+    patch = cleanSlot(merged, true);
+  } catch (e: any) {
+    if (e?.status === 400) { res.status(400); }
+    throw e;
+  }
+  const slot = await TimeSlot.findByIdAndUpdate(req.params.id, patch, { new: true, runValidators: true });
+  if (!slot) { res.status(404); throw new Error("Time slot not found"); }
+  res.locals.data = { message: "Time slot updated", slot };
+};
+
+export const deleteTimeSlot = async (req: Request, res: Response) => {
+  const slot = await TimeSlot.findByIdAndDelete(req.params.id);
+  if (!slot) { res.status(404); throw new Error("Time slot not found"); }
+  res.locals.data = { message: "Time slot deleted" };
 };
 
 // ============ GOODS TYPES ============
@@ -1185,36 +1241,6 @@ export const createAppSetting = async (req: Request, res: Response) => {
   res.locals.data = {
     message: "Setting created",
     setting,
-  };
-};
-
-// ============ SERVICE AREAS ============
-
-/**
- * Get service areas
- */
-export const getServiceAreas = async (req: Request, res: Response) => {
-  const areas = await ServiceArea.find({ isActive: true });
-
-  res.locals.data = { areas };
-};
-
-/**
- * Create/Update service area
- */
-export const upsertServiceArea = async (req: Request, res: Response) => {
-  const { id, ...data } = req.body;
-
-  let area;
-  if (id) {
-    area = await ServiceArea.findByIdAndUpdate(id, data, { new: true, runValidators: true });
-  } else {
-    area = await ServiceArea.create(data);
-  }
-
-  res.locals.data = {
-    message: "Service area saved",
-    area,
   };
 };
 

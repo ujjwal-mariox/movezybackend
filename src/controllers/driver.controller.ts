@@ -2367,7 +2367,7 @@ export const addMyVehicle = async (
       const ct = await VehicleTypeModel.findById(catalogTypeId).select("categoryCode").lean();
       categoryCode = (ct as any)?.categoryCode || categoryCode;
     }
-    const attrError = VehicleLifecycle.validateVehicleAttributes(
+    const attrError = await VehicleLifecycle.validateVehicleAttributes(
       categoryCode,
       normalizedBody,
       normalizedFuel,

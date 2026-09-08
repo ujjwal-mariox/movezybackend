@@ -1,7 +1,6 @@
 import mongoose, { Schema } from "mongoose";
 import { IVehicle } from "../interfaces/vehicle";
 import {
-  FUEL_TYPES,
   normalizeFuelType,
   normalizeVehicleNumber,
 } from "../services/vehicle-lifecycle.service";
@@ -44,7 +43,8 @@ const VehicleSchema = new Schema<IVehicle>(
       // "Electric" is what the admin's master data and the app say; the old
       // enum only knew "EV", so every electric vehicle failed validation. The
       // setter maps EV/ev/Electronic/... onto the canonical label.
-      enum: [...FUEL_TYPES],
+      // Validated against the admin's Fuel Types master at registration
+      // (vehicle-lifecycle.validateVehicleAttributes), not a fixed enum.
       set: (v: unknown) => normalizeFuelType(v) ?? v,
     },
 

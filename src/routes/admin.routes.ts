@@ -989,6 +989,34 @@ adminRouter.get(
   ErrorHandlerMiddleware(ConfigController.getTimeSlots),
   ResponseMiddleware,
 );
+adminRouter.post(
+  "/config/time-slots",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SETTINGS_UPDATE),
+  ErrorHandlerMiddleware(ConfigController.createTimeSlot),
+  ResponseMiddleware,
+);
+adminRouter.put(
+  "/config/time-slots/:id",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SETTINGS_UPDATE),
+  ErrorHandlerMiddleware(ConfigController.updateTimeSlot),
+  ResponseMiddleware,
+);
+adminRouter.delete(
+  "/config/time-slots/:id",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SETTINGS_UPDATE),
+  ErrorHandlerMiddleware(ConfigController.deleteTimeSlot),
+  ResponseMiddleware,
+);
+adminRouter.put(
+  "/config/schedule",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SETTINGS_UPDATE),
+  ErrorHandlerMiddleware(ConfigController.updateScheduleConfig),
+  ResponseMiddleware,
+);
 
 adminRouter.get(
   "/config/app-settings",

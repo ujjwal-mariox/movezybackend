@@ -1949,6 +1949,20 @@ export const getVehicleOptions = async (req: Request, res: Response) => {
       `[VehicleOptions] Total active: ${(vehicleTypes as any[]).length}, After filter: ${filteredVehicleTypes.length}, goodsTypeId: ${goodsTypeId || "none"}`
     );
 
+    // Max distance is a hard limit — a scooter is never offered a 400 km trip.
+    // Min distance and intra/inter-city only influence ranking (below).
+    const coversDistance = (t: any) =>
+      !(Number(t.maxRangeKm) > 0 && Number(distanceKm) > Number(t.maxRangeKm));
+    const inRange = filteredVehicleTypes.filter(coversDistance);
+    if (inRange.length === 0 && filteredVehicleTypes.length > 0) {
+      return res.json({
+        success: true,
+        data: [],
+        message: `No vehicle type covers a ${Math.round(Number(distanceKm))} km trip. Please contact support for long-distance moves.`,
+      });
+    }
+    filteredVehicleTypes = inRange;
+
     // City-specific rate cards apply per vehicle type; resolved once here.
     const optionsCity = await resolveBookingCity(pickup);
 

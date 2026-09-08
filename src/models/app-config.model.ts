@@ -32,6 +32,8 @@ export interface ISurgeWindow {
   endHour: number;
   /** >= 1. 1 = no surge. */
   multiplier: number;
+  /** Cities the window applies to; empty = everywhere. */
+  cities?: string[];
 }
 
 export interface IFareConfig {
@@ -71,19 +73,6 @@ export interface IFareConfig {
   refundAfterAssignPercent: number;
   refundAfterPickupPercent: number;
   isActive: boolean;
-}
-
-export interface IServiceArea {
-  _id: Types.ObjectId;
-  name: string;
-  city: string;
-  state: string;
-  coordinates: {
-    type: string;
-    coordinates: number[][][];
-  };
-  isActive: boolean;
-  fareMultiplier: number;
 }
 
 // App Config Schema
@@ -128,6 +117,7 @@ const SurgeWindowSchema = new Schema<ISurgeWindow>(
     startHour: { type: Number, required: true, min: 0, max: 23 },
     endHour: { type: Number, required: true, min: 0, max: 23 },
     multiplier: { type: Number, required: true, min: 1 },
+    cities: { type: [String], default: [] },
   },
   { _id: false },
 );
@@ -237,48 +227,8 @@ const FareConfigSchema = new Schema<IFareConfig>(
 );
 
 // Service Area Schema
-const ServiceAreaSchema = new Schema<IServiceArea>(
-  {
-    name: {
-      type: String,
-      required: true,
-    },
-    city: {
-      type: String,
-      required: true,
-      index: true,
-    },
-    state: {
-      type: String,
-      required: true,
-    },
-    coordinates: {
-      type: {
-        type: String,
-        enum: ["Polygon"],
-        required: true,
-      },
-      coordinates: {
-        type: [[[Number]]],
-        required: true,
-      },
-    },
-    isActive: {
-      type: Boolean,
-      default: true,
-      index: true,
-    },
-    fareMultiplier: {
-      type: Number,
-      default: 1,
-      min: 0.5,
-    },
-  },
-  { timestamps: true },
-);
 
 // Create 2dsphere index for geospatial queries
-ServiceAreaSchema.index({ coordinates: "2dsphere" });
 
 export const AppConfig = mongoose.model<IAppConfig>(
   "AppConfig",
@@ -287,8 +237,4 @@ export const AppConfig = mongoose.model<IAppConfig>(
 export const FareConfig = mongoose.model<IFareConfig>(
   "FareConfig",
   FareConfigSchema,
-);
-export const ServiceArea = mongoose.model<IServiceArea>(
-  "ServiceArea",
-  ServiceAreaSchema,
 );

@@ -42,6 +42,8 @@ interface InvoicePdfInput {
   invoice: IInvoice;
   /** Populated booking, if available — used for route/customer detail only. */
   booking?: any;
+  /** Company identity from Settings / Tax identity (legal name, address, contact). */
+  company?: { name?: string; legalName?: string; address?: string; email?: string; phone?: string };
 }
 
 /** One label/amount line. `negative` renders discounts as "- Rs. x". */
@@ -90,6 +92,7 @@ const rule = (doc: PDFKit.PDFDocument) => {
 export const renderInvoicePdf = async ({
   invoice,
   booking,
+  company,
 }: InvoicePdfInput): Promise<Buffer> => {
   const doc = new PDFDocument({ size: "A4", margin: PAGE_MARGIN });
 
@@ -123,6 +126,15 @@ export const renderInvoicePdf = async ({
     .fontSize(9)
     .fillColor(MUTED)
     .text("Goods delivery & logistics", textX);
+  // Who is invoicing: legal name, registered address, contact — from Settings.
+  const identity = [
+    company?.legalName || company?.name,
+    company?.address,
+    [company?.email, company?.phone].filter(Boolean).join("  ·  "),
+  ].filter(Boolean) as string[];
+  doc.font("Helvetica").fontSize(8.5).fillColor(MUTED);
+  for (const line of identity) doc.text(line, textX, undefined, { width: CONTENT_WIDTH * 0.6 });
+  const leftBottom = doc.y;
 
   doc
     .font("Helvetica-Bold")
@@ -141,6 +153,8 @@ export const renderInvoicePdf = async ({
       width: CONTENT_WIDTH,
       align: "right",
     });
+  // Continue below whichever header column is taller.
+  doc.y = Math.max(doc.y, leftBottom);
 
   doc.moveDown(2);
   doc.x = PAGE_MARGIN;

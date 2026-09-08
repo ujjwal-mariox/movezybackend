@@ -703,7 +703,7 @@ export const uploadRC = async (
     }
     const bodyType = VehicleLifecycle.normalizeBodyType(req.body.bodyType);
     const categoryCode = catalogType?.categoryCode || vehicleTypeMap[rawType];
-    const attrError = VehicleLifecycle.validateVehicleAttributes(
+    const attrError = await VehicleLifecycle.validateVehicleAttributes(
       categoryCode,
       bodyType,
       fuelType,

@@ -91,7 +91,13 @@ export interface SurgeWindow {
   startHour: number;
   endHour: number;
   multiplier: number;
+  /** Cities the window applies to; empty = everywhere. */
+  cities?: string[];
 }
+
+/** Empty city list = everywhere; otherwise the pickup city must match a listed one. */
+const windowCoversCity = (w: SurgeWindow, city?: string | null): boolean =>
+  !w.cities?.length || (!!city && w.cities.some((c) => cityMatches(String(c), String(city))));
 
 /** Inclusive start, exclusive end; wraps midnight when start > end (22 → 6). */
 const hourInWindow = (hour: number, w: SurgeWindow): boolean =>
@@ -121,6 +127,7 @@ export const surgeWindowsFor = (
         startHour: Number(w.startHour),
         endHour: Number(w.endHour),
         multiplier: Number(w.multiplier),
+        cities: Array.isArray(w.cities) ? w.cities.map(String).filter(Boolean) : [],
       }));
 
   let peak = clean(fareConfig?.peakWindows);
@@ -195,7 +202,7 @@ export const surgeAt = (
   const { peak, night } = surgeWindowsFor(fareConfig);
   let best = { multiplier: 1, label: undefined as string | undefined };
   for (const w of [...peak, ...night]) {
-    if (hourInWindow(hour, w) && w.multiplier > best.multiplier) {
+    if (hourInWindow(hour, w) && windowCoversCity(w, city) && w.multiplier > best.multiplier) {
       best = { multiplier: w.multiplier, label: w.label };
     }
   }

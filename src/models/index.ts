@@ -29,7 +29,7 @@ import { Enterprise, EnterpriseUser } from "./enterprise.model";
 import CancellationReason from "./cancellation-reason.model";
 import ProhibitedItem from "./prohibited-item.model";
 import { TimeSlot, ScheduleConfig } from "./time-slot.model";
-import { AppConfig, FareConfig, ServiceArea } from "./app-config.model";
+import { AppConfig, FareConfig } from "./app-config.model";
 import { Notification, PushTemplate } from "./notification.model";
 import Invoice from "./invoice.model";
 import { Admin, AdminSession } from "./admin.model";
@@ -137,7 +137,6 @@ export const models = {
   // Config & Settings
   AppConfig,
   FareConfig,
-  ServiceArea,
 
   // Notifications
   Notification,

@@ -20,7 +20,8 @@ const ensureInvoicePdf = async (
   if (invoice.pdfUrl) return invoice;
 
   try {
-    const buffer = await renderInvoicePdf({ invoice, booking });
+    const company = await loadCompanyIdentity();
+    const buffer = await renderInvoicePdf({ invoice, booking, company });
     const key = `invoices/${invoice.invoiceNumber}.pdf`;
     const pdfUrl = await uploadBufferToAws(buffer, key, "application/pdf");
 
@@ -295,4 +296,21 @@ export const generateMonthlyInvoiceSummary = async (
   });
 
   return summary;
+};
+
+/** Name / address / contact printed on invoices — from Settings and Tax identity. */
+export const loadCompanyIdentity = async (): Promise<{
+  name?: string; legalName?: string; address?: string; email?: string; phone?: string;
+}> => {
+  const keys = ["COMPANY_LEGAL_NAME", "COMPANY_ADDRESS", "general.company_name", "general.contact_email", "general.phone_number"];
+  const rows = await AppConfig.find({ key: { $in: keys } }).select("key value").lean();
+  const byKey: Record<string, string> = {};
+  for (const r of rows as any[]) byKey[r.key] = r.value ? String(r.value).trim() : "";
+  return {
+    name: byKey["general.company_name"] || undefined,
+    legalName: byKey.COMPANY_LEGAL_NAME || undefined,
+    address: byKey.COMPANY_ADDRESS || undefined,
+    email: byKey["general.contact_email"] || undefined,
+    phone: byKey["general.phone_number"] || undefined,
+  };
 };

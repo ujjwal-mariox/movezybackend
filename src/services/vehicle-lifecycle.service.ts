@@ -4,6 +4,7 @@ import DriverVehicle from "../models/driver-vehicle.model";
 import VehicleType from "../models/vehicle-type.model";
 import Driver from "../models/driver.model";
 import Booking from "../models/booking.model";
+import { BodyType, FuelType as FuelTypeMaster } from "../models/master-data.model";
 
 /**
  * One place for the rules a partner's vehicle has to obey. Three creation
@@ -51,20 +52,52 @@ export const TWO_WHEELER_FUEL_TYPES: FuelType[] = ["Petrol", "Electric"];
  * and fuel is limited to Petrol or Electric. Returns a message key, or null
  * when the combination is valid.
  */
-export const validateVehicleAttributes = (
+/** Active names from a master list (System Configuration), cached 5 minutes. */
+const masterCache: Record<string, { names: string[]; at: number }> = {};
+const activeMasterNames = async (which: "body" | "fuel"): Promise<string[]> => {
+  const hit = masterCache[which];
+  if (hit && Date.now() - hit.at < 5 * 60 * 1000) return hit.names;
+  try {
+    const Model: any = which === "body" ? BodyType : FuelTypeMaster;
+    const rows = await Model.find({ isActive: true }).select("name").lean();
+    masterCache[which] = { names: rows.map((r: any) => String(r.name || "")).filter(Boolean), at: Date.now() };
+  } catch {
+    masterCache[which] = { names: hit?.names || [], at: Date.now() };
+  }
+  return masterCache[which].names;
+};
+
+const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+
+/**
+ * Two-wheelers: Scooter/Bike on Petrol/Electric. Everything else: the fuel
+ * must be one of the admin's Fuel Types and the body one of the admin's Body
+ * Types (when that list is populated) — the same lists the driver app shows,
+ * so nothing the admin adds there is rejected here, and nothing else is let in.
+ */
+export const validateVehicleAttributes = async (
   categoryCode: string | undefined | null,
   bodyType: string | undefined | null,
-  fuelType: FuelType | undefined,
-): string | null => {
-  if (categoryCode !== "2W") return null;
-  if (bodyType) {
-    const ok = TWO_WHEELER_BODY_TYPES.some(
-      (b) => b.toLowerCase() === String(bodyType).trim().toLowerCase(),
-    );
-    if (!ok) return "invalid_body_type_for_two_wheeler";
+  fuelType: string | undefined,
+): Promise<string | null> => {
+  const fuel = fuelType ? String(fuelType).trim() : "";
+  if (categoryCode === "2W") {
+    if (bodyType && !TWO_WHEELER_BODY_TYPES.some((b) => sameName(b, String(bodyType)))) {
+      return "invalid_body_type_for_two_wheeler";
+    }
+    if (fuel && !TWO_WHEELER_FUEL_TYPES.some((f) => sameName(f, fuel))) {
+      return "invalid_fuel_type_for_two_wheeler";
+    }
+    return null;
   }
-  if (fuelType && !TWO_WHEELER_FUEL_TYPES.includes(fuelType)) {
-    return "invalid_fuel_type_for_two_wheeler";
+  if (fuel) {
+    const fuels = await activeMasterNames("fuel");
+    const allowed = fuels.length ? fuels : [...FUEL_TYPES];
+    if (!allowed.some((f) => sameName(f, fuel))) return "invalid_fuel_type";
+  }
+  if (bodyType) {
+    const bodies = await activeMasterNames("body");
+    if (bodies.length && !bodies.some((b) => sameName(b, String(bodyType)))) return "invalid_body_type";
   }
   return null;
 };
