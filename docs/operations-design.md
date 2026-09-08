@@ -110,3 +110,22 @@ the next hour (a booking scheduled for tomorrow is not priced on today's
 rain). Where a weather surge overlaps a peak or night window the highest
 single multiplier applies — nothing compounds. The old single "rain surge
 multiplier" was stored but never applied anywhere; it is no longer used.
+
+## 7. Vehicle catalogue rules (what filters, what only ranks)
+
+- **Max distance** on a vehicle type is a hard limit: the type is not offered
+  for a longer trip. If no type covers the distance the customer sees a clear
+  message instead of an empty list.
+- **Min distance, intra-city / inter-city and a goods category's
+  "Recommended vehicles"** only affect the order of the list. Every active
+  vehicle type is offered for both trip types, except two-wheelers on
+  outstation.
+- **City names** everywhere (rate cards, weather surges, peak/night windows)
+  come from System Configuration → Cities; the master's aliases map whatever
+  the phone's map reports onto those names.
+- **Fuel and body types** a partner can register come from System
+  Configuration → Fuel Types / Body Types (two-wheelers: Scooter/Bike on
+  Petrol/Electric). The server validates against the same lists.
+- **Time slots** for scheduled pickups and the scheduling rules (days in
+  advance, minimum notice) are edited under System Configuration → Time Slots.
+- **Peak and night windows** may be limited to a city list; empty = everywhere.
