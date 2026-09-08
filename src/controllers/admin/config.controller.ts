@@ -127,7 +127,14 @@ export const getFareConfig = async (req: Request, res: Response) => {
 
   // The windows the fare engine will actually use (legacy single-window
   // configs are read through the same helper), so the page can show them.
-  res.locals.data = { config, surge: FareService.surgeWindowsFor(config) };
+  res.locals.data = {
+    config,
+    surge: {
+      ...FareService.surgeWindowsFor(config),
+      // Weather surges live right now (any city).
+      weatherActive: FareService.activeWeatherSurges(config),
+    },
+  };
 };
 
 /**
@@ -153,12 +160,34 @@ const cleanSurgeWindows = (rows: unknown): any[] | undefined => {
     );
 };
 
+/** Weather surge rows: label, cities, multiplier 1–5, on/off, optional auto-off. */
+const cleanWeatherSurges = (rows: unknown): any[] | undefined => {
+  if (rows === undefined) return undefined;
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .map((w: any) => {
+      const until = w?.activeUntil ? new Date(w.activeUntil) : null;
+      return {
+        label: String(w?.label || "").trim(),
+        cities: (Array.isArray(w?.cities) ? w.cities : [])
+          .map((c: unknown) => String(c || "").trim())
+          .filter(Boolean),
+        multiplier: Number(w?.multiplier),
+        isActive: w?.isActive === true || w?.isActive === "true",
+        activeUntil: until && !Number.isNaN(until.getTime()) ? until : null,
+      };
+    })
+    .filter((w) => Number.isFinite(w.multiplier) && w.multiplier >= 1 && w.multiplier <= 5);
+};
+
 export const updateFareConfig = async (req: Request, res: Response) => {
   const updateData = { ...req.body };
   const peak = cleanSurgeWindows(updateData.peakWindows);
   const night = cleanSurgeWindows(updateData.nightWindows);
   if (peak !== undefined) updateData.peakWindows = peak;
   if (night !== undefined) updateData.nightWindows = night;
+  const weather = cleanWeatherSurges(updateData.weatherSurges);
+  if (weather !== undefined) updateData.weatherSurges = weather;
 
   // Read the live config BEFORE writing, so the audit row can carry the value
   // that was replaced. Changing driver commission or GST left no record at all

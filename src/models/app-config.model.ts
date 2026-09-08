@@ -10,6 +10,20 @@ export interface IAppConfig {
   isEditable: boolean;
 }
 
+/**
+ * A weather surge an admin switches ON (rain, storm) for the cities it names.
+ * Applies to new quotes while active; `activeUntil` lets it switch itself off.
+ */
+export interface IWeatherSurge {
+  label: string;
+  /** Empty = every city. Matched against the pickup city like rate cards. */
+  cities: string[];
+  /** >= 1. */
+  multiplier: number;
+  isActive: boolean;
+  activeUntil?: Date | null;
+}
+
 export interface ISurgeWindow {
   label?: string;
   /** 0-23, inclusive start. */
@@ -44,6 +58,7 @@ export interface IFareConfig {
    */
   peakWindows: ISurgeWindow[];
   nightWindows: ISurgeWindow[];
+  weatherSurges: IWeatherSurge[];
   /**
    * Refund ceiling by cancellation stage, as a percentage of the fare.
    *
@@ -113,6 +128,17 @@ const SurgeWindowSchema = new Schema<ISurgeWindow>(
     startHour: { type: Number, required: true, min: 0, max: 23 },
     endHour: { type: Number, required: true, min: 0, max: 23 },
     multiplier: { type: Number, required: true, min: 1 },
+  },
+  { _id: false },
+);
+
+const WeatherSurgeSchema = new Schema<IWeatherSurge>(
+  {
+    label: { type: String, trim: true, default: "" },
+    cities: { type: [String], default: [] },
+    multiplier: { type: Number, min: 1, default: 1.3 },
+    isActive: { type: Boolean, default: false },
+    activeUntil: { type: Date, default: null },
   },
   { _id: false },
 );
@@ -199,6 +225,9 @@ const FareConfigSchema = new Schema<IFareConfig>(
     // Multi-row surge (client: "Morning 8-10 AM 1.5x; Evening 6-8 PM 1.8x").
     peakWindows: { type: [SurgeWindowSchema], default: [] },
     nightWindows: { type: [SurgeWindowSchema], default: [] },
+    // Weather surge: region-based, switched on/off by the admin (rainSurgeMultiplier
+    // above is the legacy single figure and is no longer read).
+    weatherSurges: { type: [WeatherSurgeSchema], default: [] },
     isActive: {
       type: Boolean,
       default: true,

@@ -1,7 +1,7 @@
 import { FareConfig } from "../models/app-config.model";
 import VehicleType from "../models/vehicle-type.model";
 import { Types } from "mongoose";
-import { resolveRates, type EffectiveRates } from "./vehicle-rate.service";
+import { resolveRates, cityMatches, type EffectiveRates } from "./vehicle-rate.service";
 import { computeBookingTax } from "./tax.service";
 import type { ITaxBreakdown } from "../models/tax-breakdown.schema";
 
@@ -155,9 +155,41 @@ export const surgeWindowsFor = (
  * window drawn to overlap another can't produce a 1.5 × 1.8 = 2.7× fare
  * nobody configured.
  */
+/**
+ * Weather surges in force for a city at a moment: switched ON, not past their
+ * auto-off time, and covering the pickup city (no cities = everywhere).
+ * Weather is a "now" condition, so it only applies to pickups within the
+ * next hour — a booking scheduled for tomorrow is not priced on today's rain.
+ */
+export const activeWeatherSurges = (
+  fareConfig: any,
+  city?: string | null,
+  when: Date = new Date(),
+): Array<{ label: string; multiplier: number; cities: string[] }> => {
+  const rows = Array.isArray(fareConfig?.weatherSurges) ? fareConfig.weatherSurges : [];
+  const nearNow = when.getTime() - Date.now() < 60 * 60 * 1000;
+  if (!nearNow) return [];
+  const now = Date.now();
+  return rows
+    .filter((w: any) => {
+      if (!w || !w.isActive || !(Number(w.multiplier) > 1)) return false;
+      if (w.activeUntil && new Date(w.activeUntil).getTime() <= now) return false;
+      const cities: string[] = Array.isArray(w.cities) ? w.cities.filter(Boolean) : [];
+      if (cities.length === 0) return true;
+      if (!city) return false;
+      return cities.some((c) => cityMatches(String(c), String(city)));
+    })
+    .map((w: any) => ({
+      label: String(w.label || "Weather"),
+      multiplier: Number(w.multiplier),
+      cities: Array.isArray(w.cities) ? w.cities : [],
+    }));
+};
+
 export const surgeAt = (
   fareConfig: any,
   when: Date = new Date(),
+  city?: string | null,
 ): { multiplier: number; label?: string } => {
   const hour = when.getHours();
   const { peak, night } = surgeWindowsFor(fareConfig);
@@ -166,6 +198,11 @@ export const surgeAt = (
     if (hourInWindow(hour, w) && w.multiplier > best.multiplier) {
       best = { multiplier: w.multiplier, label: w.label };
     }
+  }
+  // Weather (region-based, admin-switched) competes on the same rule: the
+  // highest single multiplier wins, nothing compounds.
+  for (const w of activeWeatherSurges(fareConfig, city, when)) {
+    if (w.multiplier > best.multiplier) best = { multiplier: w.multiplier, label: w.label };
   }
   return best;
 };
@@ -208,7 +245,7 @@ export const calculateFare = async (
   const timeCharge = input.durationMin * rates.perMinuteRate;
 
   // Get surge multiplier
-  const surge = surgeAt(fareConfig, input.scheduledTime);
+  const surge = surgeAt(fareConfig, input.scheduledTime, input.city);
   const surgeMultiplier = surge.multiplier;
   const baseFareWithSurge = baseFare + distanceCharge + timeCharge;
   const surgeCharge =
