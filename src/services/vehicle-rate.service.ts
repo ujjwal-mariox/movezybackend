@@ -1,5 +1,6 @@
 import VehicleType from "../models/vehicle-type.model";
 import { cache } from "../utils/redis.util";
+import { City } from "../models/master-data.model";
 
 /**
  * City-aware pricing for a vehicle type.
@@ -222,6 +223,73 @@ export const resolveCityFromCoords = async (
  * least one city override, so older app builds and a plain single-city
  * deployment never pay for a lookup they can't use.
  */
+// ── City master: one name per city ──────────────────────────────────────────
+//
+// Admins pick cities from System Configuration → Cities; the phone's geocoder
+// reports whatever it likes ("Bengaluru", "Bangalore Urban", "Pune City").
+// Every reported name is mapped onto the master name here (aliases first,
+// then the same tolerant matching rate cards use), so a booking's city, the
+// rate card and the weather surge all speak the same name.
+let cityMaster: { rows: Array<{ name: string; aliases: string[] }>; at: number } | null = null;
+const CITY_MASTER_TTL_MS = 5 * 60 * 1000;
+
+export const invalidateCityMasterCache = (): void => {
+  cityMaster = null;
+};
+
+const loadCityMaster = async (): Promise<Array<{ name: string; aliases: string[] }>> => {
+  if (cityMaster && Date.now() - cityMaster.at < CITY_MASTER_TTL_MS) return cityMaster.rows;
+  try {
+    const rows = await City.find({ isActive: true }).select("name aliases").lean();
+    cityMaster = {
+      rows: (rows as any[]).map((r) => ({
+        name: String(r.name || ""),
+        aliases: Array.isArray(r.aliases) ? r.aliases.map((a: unknown) => String(a || "")) : [],
+      })),
+      at: Date.now(),
+    };
+  } catch {
+    cityMaster = { rows: cityMaster?.rows || [], at: Date.now() };
+  }
+  return cityMaster.rows;
+};
+
+/**
+ * The master city name for a reported one, or the reported name unchanged
+ * when the master has no match (an unknown city still prices on Default).
+ */
+export const canonicalCityName = async (raw: string | null | undefined): Promise<string | null> => {
+  const reported = String(raw || "").trim();
+  if (!reported) return null;
+  const n = normalizeCity(reported);
+  const rows = await loadCityMaster();
+  if (rows.length === 0) return reported;
+
+  // 1. exact name or alias
+  for (const r of rows) {
+    if (normalizeCity(r.name) === n) return r.name;
+    if (r.aliases.some((a) => normalizeCity(a) === n)) return r.name;
+  }
+  // 2. containment either way — prefer the longest master name ("Navi Mumbai" over "Mumbai")
+  const contained = rows
+    .filter((r) => {
+      const m = normalizeCity(r.name);
+      if (m && (n.includes(m) || m.includes(n))) return true;
+      return r.aliases.some((a) => {
+        const an = normalizeCity(a);
+        return an && (n.includes(an) || an.includes(n));
+      });
+    })
+    .sort((a, b) => normalizeCity(b.name).length - normalizeCity(a.name).length);
+  if (contained.length) return contained[0].name;
+  // 3. a shared meaningful word
+  const tokens = new Set(cityTokens(reported));
+  const shared = rows.find(
+    (r) => cityTokens(r.name).some((t) => tokens.has(t)) || r.aliases.some((a) => cityTokens(a).some((t) => tokens.has(t))),
+  );
+  return shared ? shared.name : reported;
+};
+
 export const resolveBookingCity = async (
   pickup:
     | { city?: string | null; lat?: number | string; lng?: number | string }
@@ -229,9 +297,10 @@ export const resolveBookingCity = async (
     | undefined,
 ): Promise<string | null> => {
   const sent = String(pickup?.city || "").trim();
-  if (sent) return sent;
+  if (sent) return canonicalCityName(sent);
   if (!(await anyCityOverridesConfigured())) return null;
-  return resolveCityFromCoords(Number(pickup?.lat), Number(pickup?.lng));
+  const geo = await resolveCityFromCoords(Number(pickup?.lat), Number(pickup?.lng));
+  return canonicalCityName(geo);
 };
 
 /**

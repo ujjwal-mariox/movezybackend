@@ -16,6 +16,8 @@ export interface ICity {
   _id: Types.ObjectId;
   name: string;
   state: string;
+  /** Other spellings the map provider / apps may report: "bengaluru", "bangalore urban". */
+  aliases: string[];
   isActive: boolean;
   sortOrder: number;
 }
@@ -40,6 +42,7 @@ const CitySchema = new Schema<ICity>(
   {
     name: { type: String, required: true, trim: true },
     state: { type: String, required: true, trim: true },
+    aliases: { type: [String], default: [] },
     isActive: { type: Boolean, default: true },
     sortOrder: { type: Number, default: 0 },
   },

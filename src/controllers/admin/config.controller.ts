@@ -1347,6 +1347,17 @@ export const getCities = async (req: Request, res: Response) => {
   };
 };
 
+/** Aliases arrive as an array or a comma-separated string; stored lowercase, deduped. */
+const normalizeAliases = (raw: unknown, own?: string): string[] => {
+  const list = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(",") : [];
+  const seen = new Set<string>();
+  for (const a of list) {
+    const v = String(a || "").trim().toLowerCase();
+    if (v && v !== String(own || "").trim().toLowerCase()) seen.add(v);
+  }
+  return Array.from(seen);
+};
+
 export const createCity = async (req: Request, res: Response) => {
   const { name, state, sortOrder } = req.body;
   if (!name || !state) { res.status(400); throw new Error("name and state are required"); }
@@ -1354,14 +1365,20 @@ export const createCity = async (req: Request, res: Response) => {
   const existing = await City.findOne({ name: { $regex: `^${name}$`, $options: "i" }, state: { $regex: `^${state}$`, $options: "i" } });
   if (existing) { res.status(409); throw new Error(`City '${name}, ${state}' already exists`); }
 
-  const city = await City.create({ name, state, sortOrder: sortOrder ?? 0 });
+  const city = await City.create({ name, state, sortOrder: sortOrder ?? 0, aliases: normalizeAliases(req.body.aliases, name) });
+  const { invalidateCityMasterCache } = await import("../../services/vehicle-rate.service");
+  invalidateCityMasterCache();
   res.locals.data = { message: "City created", city };
 };
 
 export const updateCity = async (req: Request, res: Response) => {
   const { id } = req.params;
-  const city = await City.findByIdAndUpdate(id, req.body, { new: true, runValidators: true });
+  const patch: Record<string, unknown> = { ...req.body };
+  if ("aliases" in patch) patch.aliases = normalizeAliases(patch.aliases, String(patch.name || ""));
+  const city = await City.findByIdAndUpdate(id, patch, { new: true, runValidators: true });
   if (!city) { res.status(404); throw new Error("City not found"); }
+  const { invalidateCityMasterCache } = await import("../../services/vehicle-rate.service");
+  invalidateCityMasterCache();
   res.locals.data = { message: "City updated", city };
 };
 
@@ -1369,6 +1386,8 @@ export const deleteCity = async (req: Request, res: Response) => {
   const { id } = req.params;
   const city = await City.findByIdAndUpdate(id, { isActive: false }, { new: true, runValidators: true });
   if (!city) { res.status(404); throw new Error("City not found"); }
+  const { invalidateCityMasterCache } = await import("../../services/vehicle-rate.service");
+  invalidateCityMasterCache();
   res.locals.data = { message: "City deleted", city };
 };
 
