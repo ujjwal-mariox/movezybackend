@@ -6,6 +6,16 @@ import {
   ServiceArea,
 } from "../../models/app-config.model";
 import VehicleType from "../../models/vehicle-type.model";
+
+/** Customer-facing lists are cached; every vehicle-type change must clear them. */
+const invalidateVehicleTypeCaches = async (): Promise<void> => {
+  try {
+    await cache.del("vehicleTypes:active");
+    await cache.del("vehicle-types:city-overrides-exist");
+  } catch {
+    /* cache optional */
+  }
+};
 import VehicleCategory from "../../models/vehicle-category.model";
 import ServiceType from "../../models/service-type.model";
 import AddonService from "../../models/addon-service.model";
@@ -286,6 +296,7 @@ export const getVehicleTypes = async (req: Request, res: Response) => {
  * Create vehicle type (with optional image upload)
  */
 export const createVehicleType = async (req: Request, res: Response) => {
+  await invalidateVehicleTypeCaches();
   const data = coerceVehicleTypeFields({ ...req.body });
 
   // Handle image file upload
@@ -315,6 +326,7 @@ export const createVehicleType = async (req: Request, res: Response) => {
  * Update vehicle type (with optional image upload)
  */
 export const updateVehicleType = async (req: Request, res: Response) => {
+  await invalidateVehicleTypeCaches();
   const { id } = req.params;
   const data = coerceVehicleTypeFields({ ...req.body });
 
@@ -358,6 +370,7 @@ export const updateVehicleType = async (req: Request, res: Response) => {
  * Toggle vehicle type active status
  */
 export const toggleVehicleType = async (req: Request, res: Response) => {
+  await invalidateVehicleTypeCaches();
   const { id } = req.params;
 
   const vehicleType = await VehicleType.findById(id);
@@ -397,6 +410,7 @@ export const toggleVehicleType = async (req: Request, res: Response) => {
  * Soft delete vehicle type
  */
 export const deleteVehicleType = async (req: Request, res: Response) => {
+  await invalidateVehicleTypeCaches();
   const { id } = req.params;
 
   const vehicleType = await VehicleType.findByIdAndUpdate(

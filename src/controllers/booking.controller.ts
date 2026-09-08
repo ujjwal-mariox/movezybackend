@@ -1930,20 +1930,20 @@ export const getVehicleOptions = async (req: Request, res: Response) => {
       goodsType = await GoodsType.findById(goodsTypeId);
     }
 
-    // Filter vehicles by goods type's allowedVehicleTypes (if specified)
-    let filteredVehicleTypes = vehicleTypes as any[];
-    if (goodsType?.allowedVehicleTypes?.length > 0) {
-      const allowedIds = goodsType.allowedVehicleTypes.map((id: any) =>
-        id.toString()
-      );
-      filteredVehicleTypes = (vehicleTypes as any[]).filter((type: any) =>
-        allowedIds.includes(type._id.toString())
-      );
-      // Fallback to all if filter empties the list (misconfigured data)
-      if (filteredVehicleTypes.length === 0) {
-        filteredVehicleTypes = vehicleTypes as any[];
-      }
-    }
+    // Every active vehicle type stays visible. A goods type's
+    // allowedVehicleTypes used to HIDE the others — "only one or two vehicles
+    // appear" — so it now boosts those vehicles up the list instead.
+    const goodsAllowedIds = new Set<string>(
+      (goodsType?.allowedVehicleTypes || []).map((id: any) => id.toString()),
+    );
+    const requestedService = serviceType || "WITHIN_CITY";
+    // Two-wheelers do not run outstation; everything else is offered there.
+    let filteredVehicleTypes = (vehicleTypes as any[]).filter(
+      (type: any) => !(requestedService === "OUTSTATION" && type.categoryCode === "2W"),
+    );
+    if (filteredVehicleTypes.length === 0) filteredVehicleTypes = vehicleTypes as any[];
+    // The vehicle the customer picked on the home screen is always recommended.
+    const preferredVehicleTypeId = String(req.body?.preferredVehicleTypeId || req.body?.vehicleTypeId || "");
 
     console.log(
       `[VehicleOptions] Total active: ${(vehicleTypes as any[]).length}, After filter: ${filteredVehicleTypes.length}, goodsTypeId: ${goodsTypeId || "none"}`
@@ -1988,6 +1988,9 @@ export const getVehicleOptions = async (req: Request, res: Response) => {
         // 5. Prefer lower sort order (admin-configured priority)
         score += Math.max(0, 10 - (type.sortOrder || 0));
 
+        // 6. Suits the declared goods (was a hard filter; now a strong boost)
+        if (goodsAllowedIds.has(type._id.toString())) score += 25;
+
         return {
           vehicleType: type,
           fare: fare.finalFare,
@@ -2006,10 +2009,19 @@ export const getVehicleOptions = async (req: Request, res: Response) => {
       }),
     );
 
-    // Sort by score descending, mark top one as recommended
+    // Sort by score descending, mark top one as recommended — and the
+    // customer's own pick, which the app shows first under Recommended.
     options.sort((a, b) => b.score - a.score);
     if (options.length > 0) {
       options[0].isRecommended = true;
+    }
+    if (preferredVehicleTypeId) {
+      const preferred = options.find((o: any) => String(o.vehicleType?._id) === preferredVehicleTypeId);
+      if (preferred) {
+        preferred.isRecommended = true;
+        options.splice(options.indexOf(preferred), 1);
+        options.unshift(preferred);
+      }
     }
 
     // Admin-managed automatic discount (strikethrough pricing). Attached per

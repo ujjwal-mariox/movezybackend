@@ -7,6 +7,7 @@ import * as PromoController from "../controllers/admin/promo.controller";
 import * as UserDiscountController from "../controllers/admin/user-discount.controller";
 import * as OnboardingCouponController from "../controllers/admin/onboarding-coupon.controller";
 import * as ConfigController from "../controllers/admin/config.controller";
+import * as ChatQuickReplyController from "../controllers/admin/chat-quick-reply.controller";
 import * as ContentController from "../controllers/admin/content.controller";
 import * as FaqController from "../controllers/admin/faq.controller";
 import * as SupportController from "../controllers/admin/support.controller";
@@ -718,6 +719,22 @@ adminRouter.put(
   verifyAdminToken,
   requirePermission(PERMISSIONS.SETTINGS_UPDATE),
   ErrorHandlerMiddleware(ConfigController.updateSupportContact),
+  ResponseMiddleware,
+);
+
+// Predefined chat lines for the driver and customer apps
+adminRouter.get(
+  "/chat/quick-replies",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SETTINGS_VIEW),
+  ErrorHandlerMiddleware(ChatQuickReplyController.getQuickReplies),
+  ResponseMiddleware,
+);
+adminRouter.put(
+  "/chat/quick-replies",
+  verifyAdminToken,
+  requirePermission(PERMISSIONS.SETTINGS_UPDATE),
+  ErrorHandlerMiddleware(ChatQuickReplyController.replaceQuickReplies),
   ResponseMiddleware,
 );
 

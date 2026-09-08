@@ -1,4 +1,6 @@
 import PDFDocument from "pdfkit";
+import fs from "fs";
+import path from "path";
 import { IInvoice } from "../models/invoice.model";
 
 /**
@@ -98,17 +100,29 @@ export const renderInvoicePdf = async ({
     doc.on("error", reject);
   });
 
-  // Header
+  // Header — brand mark + name. The logo ships in the repo (assets/logo.png,
+  // resolved from the process root so it works from dist/ too); the text
+  // header stands alone if the file is ever missing.
+  const logoPath = path.join(process.cwd(), "assets", "logo.png");
+  let textX = PAGE_MARGIN;
+  if (fs.existsSync(logoPath)) {
+    try {
+      doc.image(logoPath, PAGE_MARGIN, PAGE_MARGIN - 6, { height: 36 });
+      textX = PAGE_MARGIN + 44;
+    } catch {
+      textX = PAGE_MARGIN;
+    }
+  }
   doc
     .font("Helvetica-Bold")
     .fontSize(22)
     .fillColor(BRAND)
-    .text("MOVEZY", PAGE_MARGIN, PAGE_MARGIN);
+    .text("Movezy", textX, PAGE_MARGIN);
   doc
     .font("Helvetica")
     .fontSize(9)
     .fillColor(MUTED)
-    .text("Goods delivery & logistics");
+    .text("Goods delivery & logistics", textX);
 
   doc
     .font("Helvetica-Bold")
