@@ -439,14 +439,6 @@ export const getDashboard = async (
       };
     });
 
-    // The rate the settlement will actually charge, read once for every
-    // booking mapped below.
-    const dashFareConfig = await FareConfig.findOne({ isActive: true })
-      .select("driverCommissionPercent")
-      .lean();
-    const commissionPercent = Number(
-      (dashFareConfig as any)?.driverCommissionPercent ?? 20,
-    );
 
     req.rData = {
       driver: {
@@ -469,8 +461,16 @@ export const getDashboard = async (
         lockedBalance: Number(wallet?.lockedBalance || 0),
       },
       // Surfaced so the driver app can explain where the estimate comes from
-      // instead of presenting a net figure with no visible derivation.
-      commissionPercent,
+      // instead of presenting a net figure with no visible derivation. This is
+      // the rate for the driver's active vehicle in their city; each booking
+      // below carries its own (frozen once completed).
+      commissionPercent: await commissionForBooking({
+        vehicleTypeId: (
+          scope.vehicles.find((v: any) => String(v._id) === (scope.scopedVehicleId || scope.activeVehicleId)) ||
+          scope.vehicles[0]
+        )?.vehicleTypeId,
+        pickup: { city: driver.city },
+      }),
       // Multi-vehicle partners: which vehicle the figures below are for.
       vehicles: scope.vehicles.map((v: any) => ({
         id: String(v._id),
@@ -502,7 +502,7 @@ export const getDashboard = async (
       },
       bookings: {
         current: currentBooking
-          ? mapDashboardBooking(currentBooking, commissionPercent)
+          ? await mapDashboardBookingAsync(currentBooking)
           : null,
         pending: await (async () => {
           // Attach this driver's own offer window per pending booking so the
@@ -523,16 +523,18 @@ export const getDashboard = async (
           const expiryByBooking = new Map(
             myOffers.map((o: any) => [String(o.bookingId), o.expiresAt]),
           );
-          return pendingBookings.map((booking: any) => ({
-            ...mapDashboardBooking(booking, commissionPercent),
-            offerExpiresAt:
-              expiryByBooking.get(String(booking._id))?.toISOString?.() ??
-              expiryByBooking.get(String(booking._id)) ??
-              null,
-          }));
+          return Promise.all(
+            pendingBookings.map(async (booking: any) => ({
+              ...(await mapDashboardBookingAsync(booking)),
+              offerExpiresAt:
+                expiryByBooking.get(String(booking._id))?.toISOString?.() ??
+                expiryByBooking.get(String(booking._id)) ??
+                null,
+            })),
+          );
         })(),
-        completed: completedBookings.map((booking) =>
-          mapDashboardBooking(booking, commissionPercent),
+        completed: await Promise.all(
+          completedBookings.map((booking) => mapDashboardBookingAsync(booking)),
         ),
       },
       // Lets the home screen show the "complete training to start earning" card
@@ -1305,7 +1307,7 @@ export const getRecommendedBookings = async (
       .limit(10)
       .lean();
 
-    req.rData = bookings.map((b) => mapDashboardBooking(b));
+    req.rData = await Promise.all(bookings.map((b) => mapDashboardBookingAsync(b)));
     req.msg = "bookings_fetched";
     next();
   } catch (error) {
@@ -1378,7 +1380,7 @@ export const getCurrentBooking = async (
       .populate("vehicleTypeId", "name icon image")
       .lean();
 
-    req.rData = booking ? mapDashboardBooking(booking) : null;
+    req.rData = booking ? await mapDashboardBookingAsync(booking) : null;
     req.msg = booking ? "booking_fetched" : "no_active_booking";
     next();
   } catch (error) {
@@ -1452,14 +1454,6 @@ export const acceptBooking = async (
       .populate("vehicleTypeId", "name icon image")
       .lean();
 
-    // Use the configured commission, not the mapper's default 20 — otherwise
-    // the earnings shown right after accepting can differ from the dashboard's.
-    const acceptFareConfig = await FareConfig.findOne({ isActive: true })
-      .select("driverCommissionPercent")
-      .lean();
-    const acceptCommission = Number(
-      (acceptFareConfig as any)?.driverCommissionPercent ?? 20,
-    );
 
     // Put the job in the driver's inbox.
     //
@@ -1489,9 +1483,7 @@ export const acceptBooking = async (
       );
     }
 
-    req.rData = booking
-      ? mapDashboardBooking(booking, acceptCommission)
-      : null;
+    req.rData = booking ? await mapDashboardBookingAsync(booking) : null;
     req.msg = "booking_accepted";
     next();
   } catch (error) {
@@ -2739,21 +2731,51 @@ function scrubOtps<T>(booking: T): T {
   return booking;
 }
 
+/**
+ * The commission this booking settles at: the frozen figure once completed,
+ * otherwise the vehicle type's own rate for the pickup city (the same lookup
+ * completeTrip uses), so the estimate the driver sees is the one they get.
+ */
+async function commissionForBooking(booking: any): Promise<number> {
+  if (Number.isFinite(Number(booking?.commissionPercent)) && booking?.commissionPercent !== null && booking?.commissionPercent !== undefined) {
+    return Number(booking.commissionPercent);
+  }
+  const vehicleTypeId = booking?.vehicleTypeId?._id ?? booking?.vehicleTypeId;
+  try {
+    return await FareService.commissionPercentFor(vehicleTypeId, booking?.pickup?.city);
+  } catch {
+    return 20;
+  }
+}
+
+/** mapDashboardBooking with the booking's real commission rate resolved first. */
+async function mapDashboardBookingAsync(booking: any) {
+  return mapDashboardBooking(booking, await commissionForBooking(booking));
+}
+
 function mapDashboardBooking(booking: any, commissionPercent = 20) {
   // What this trip is actually worth to the driver, using the same formula the
   // settlement freezes at completion (subtotal - commission, pre-GST). Sent as
   // a distinct field so no client is tempted to label finalFare "earnings".
   const settlementBase = Number(booking?.subtotal ?? 0);
+  const estimatedCommission =
+    Math.round(((settlementBase * commissionPercent) / 100) * 100) / 100;
   const estimatedEarnings =
     settlementBase > 0
-      ? Math.round((settlementBase * (100 - commissionPercent)) / 100 * 100) /
-        100
+      ? Math.round((settlementBase - estimatedCommission) * 100) / 100
       : 0;
 
   return {
     // Frozen once completed; before that, the estimate above.
     estimatedEarnings: Number(booking?.driverEarnings ?? estimatedEarnings),
     commissionPercent,
+    commissionAmount: Number(booking?.commissionAmount ?? estimatedCommission),
+    // Both sides of the money, so the driver app can explain the difference
+    // between what the customer pays (incl. GST) and what the driver earns.
+    subtotal: settlementBase,
+    gstAmount: Number(booking?.gstAmount ?? 0),
+    gstPercentage: Number(booking?.gstPercentage ?? 0),
+    customerTotal: Number(booking?.finalFare ?? booking?.fare ?? 0),
     id: String(booking?._id || ""),
     bookingNumber: booking?.bookingNumber || "",
     serviceType: booking?.serviceType || "",

@@ -32,6 +32,8 @@ export default ChatQuickReply;
 
 export const DEFAULT_QUICK_REPLIES: Record<"DRIVER" | "USER", string[]> = {
   DRIVER: [
+    "I am coming.",
+    "I am at the pickup point.",
     "I'm on my way to the pickup.",
     "I've reached the pickup point.",
     "Please share the exact location or a landmark.",
