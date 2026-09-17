@@ -13,7 +13,8 @@
     "start:prod": "NODE_ENV=production node dist/server.js",
     "lint": "eslint src --ext .ts",
     "seed": "ts-node src/seeds/index.ts",
-    "seed:roles": "ts-node src/scripts/seed-roles.ts"
+    "seed:roles": "ts-node src/scripts/seed-roles.ts",
+    "dev:qa": "ts-node src/server.ts --no-jobs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.958.0",

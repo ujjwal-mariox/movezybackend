@@ -1857,13 +1857,16 @@ export const completeTrip = async (
       booking.vehicleTypeId as any,
       (booking as any).pickup?.city,
     );
-    const settlementBase = booking.subtotal ?? 0;
+    // Commission is taken on the pre-tax subtotal EXCLUDING tolls and parking:
+    // those are pass-through costs the driver paid out of pocket, so they go
+    // to the driver in full (client rule, 2026-09-17).
+    const settlementBase = commissionableBase(booking);
     const commissionAmount =
       Math.round(((settlementBase * commissionPercent) / 100) * 100) / 100;
     booking.commissionPercent = commissionPercent;
     booking.commissionAmount = commissionAmount;
     booking.driverEarnings =
-      Math.round((settlementBase - commissionAmount) * 100) / 100;
+      Math.round(((booking.subtotal ?? 0) - commissionAmount) * 100) / 100;
 
     await booking.save();
 
@@ -2732,6 +2735,18 @@ function scrubOtps<T>(booking: T): T {
 }
 
 /**
+ * The part of the subtotal commission applies to: everything except tolls and
+ * parking, which are reimbursed to the driver in full. Shared by the settlement
+ * in completeTrip and the estimate shown before completion.
+ */
+function commissionableBase(booking: any): number {
+  const subtotal = Number(booking?.subtotal ?? 0);
+  const passThrough =
+    Number(booking?.tollCharges ?? 0) + Number(booking?.parkingCharges ?? 0);
+  return Math.max(0, Math.round((subtotal - passThrough) * 100) / 100);
+}
+
+/**
  * The commission this booking settles at: the frozen figure once completed,
  * otherwise the vehicle type's own rate for the pickup city (the same lookup
  * completeTrip uses), so the estimate the driver sees is the one they get.
@@ -2759,7 +2774,8 @@ function mapDashboardBooking(booking: any, commissionPercent = 20) {
   // a distinct field so no client is tempted to label finalFare "earnings".
   const settlementBase = Number(booking?.subtotal ?? 0);
   const estimatedCommission =
-    Math.round(((settlementBase * commissionPercent) / 100) * 100) / 100;
+    Math.round(((commissionableBase(booking) * commissionPercent) / 100) * 100) /
+    100;
   const estimatedEarnings =
     settlementBase > 0
       ? Math.round((settlementBase - estimatedCommission) * 100) / 100

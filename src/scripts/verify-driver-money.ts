@@ -14,12 +14,14 @@ import * as FareService from "../services/fare.service";
   const rows = await Booking.find({ status: "COMPLETED", driverEarnings: { $exists: true } })
     .sort({ completedAt: -1, updatedAt: -1 })
     .limit(8)
-    .select("bookingNumber vehicleTypeId pickup.city subtotal gstAmount gstPercentage finalFare commissionPercent commissionAmount driverEarnings")
+    .select("bookingNumber vehicleTypeId pickup.city subtotal tollCharges parkingCharges gstAmount gstPercentage finalFare commissionPercent commissionAmount driverEarnings")
     .lean();
   let mismatches = 0;
   for (const b of rows as any[]) {
     const pct = await FareService.commissionPercentFor(b.vehicleTypeId, b.pickup?.city);
-    const est = Math.round((b.subtotal - Math.round(((b.subtotal * pct) / 100) * 100) / 100) * 100) / 100;
+    // Commission excludes tolls/parking (pass-through to the driver).
+    const base = Math.max(0, b.subtotal - Number(b.tollCharges || 0) - Number(b.parkingCharges || 0));
+    const est = Math.round((b.subtotal - Math.round(((base * pct) / 100) * 100) / 100) * 100) / 100;
     const ok = Math.abs(est - Number(b.driverEarnings)) < 0.01;
     if (!ok) mismatches++;
     console.log(

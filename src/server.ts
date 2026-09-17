@@ -282,8 +282,17 @@ const preflight = () => {
     startDelayDetection();
     startOnboardingReminders();
     startAutomationEngine();
-    startJobScheduler();
-    startReportScheduler();
+    // A second instance pointed at the production database (local QA, a
+    // one-off script) must not run the dispatch/expiry/report jobs alongside
+    // the deployed one: `--no-jobs` or DISABLE_JOBS=true keeps it API-only.
+    const noJobs =
+      process.argv.includes("--no-jobs") || process.env.DISABLE_JOBS === "true";
+    if (noJobs) {
+      console.log("⏸️  Background jobs disabled for this instance (--no-jobs)");
+    } else {
+      startJobScheduler();
+      startReportScheduler();
+    }
     startScheduledDispatch();
     // Assign DRV-/CUS- display codes to any driver/customer missing one.
     // Idempotent; new signups get theirs at creation.
