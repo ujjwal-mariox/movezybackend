@@ -11,6 +11,7 @@ import * as ChatQuickReplyController from "../controllers/admin/chat-quick-reply
 import * as ContentController from "../controllers/admin/content.controller";
 import * as FaqController from "../controllers/admin/faq.controller";
 import * as SupportController from "../controllers/admin/support.controller";
+import * as ContactMessageController from "../controllers/admin/contact-message.controller";
 import * as ReportsController from "../controllers/admin/reports.controller";
 import * as ExportController from "../controllers/admin/export.controller";
 import * as ComplianceController from "../controllers/admin/compliance.controller";
@@ -46,6 +47,9 @@ import { PERMISSIONS } from "../models/role.model";
 
 const adminRouter = Router();
 const { verifyAdminToken, requirePermission } = AdminAuthMiddleware();
+
+adminRouter.get("/contact-messages", verifyAdminToken, requirePermission(PERMISSIONS.SUPPORT_VIEW), ErrorHandlerMiddleware(ContactMessageController.listContactMessages), ResponseMiddleware);
+adminRouter.put("/contact-messages/:id/status", verifyAdminToken, requirePermission(PERMISSIONS.SUPPORT_RESOLVE), ErrorHandlerMiddleware(ContactMessageController.updateContactMessageStatus), ResponseMiddleware);
 
 // ============ AUTH ============
 adminRouter.post(

@@ -1,4 +1,5 @@
 import mongoose, { Schema, Types } from "mongoose";
+import { CONTACT_CATEGORIES, type ContactCategory } from "../services/contact-category.service";
 
 /**
  * A message from the website contact form. Stored first, emailed second —
@@ -10,6 +11,7 @@ export interface IContactMessage {
   email: string;
   phone?: string;
   subject: string;
+  category: ContactCategory;
   message: string;
   source: string;
   ip?: string;
@@ -27,6 +29,7 @@ const ContactMessageSchema = new Schema<IContactMessage>(
     email: { type: String, required: true, trim: true, lowercase: true, maxlength: 200 },
     phone: { type: String, trim: true, maxlength: 20 },
     subject: { type: String, required: true, trim: true, maxlength: 120 },
+    category: { type: String, enum: Object.keys(CONTACT_CATEGORIES), default: "OTHER", index: true },
     message: { type: String, required: true, trim: true, maxlength: 4000 },
     source: { type: String, default: "website" },
     ip: String,
@@ -39,6 +42,7 @@ const ContactMessageSchema = new Schema<IContactMessage>(
 );
 
 ContactMessageSchema.index({ createdAt: -1 });
+ContactMessageSchema.index({ category: 1, status: 1, createdAt: -1 });
 
 const ContactMessage = mongoose.model<IContactMessage>("ContactMessage", ContactMessageSchema);
 export default ContactMessage;

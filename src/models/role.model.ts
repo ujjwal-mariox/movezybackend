@@ -341,6 +341,7 @@ export const SIDEBAR_MODULES = {
   notifications: [PERMISSIONS.NOTIFICATIONS_VIEW],
   promos: [PERMISSIONS.PROMOS_VIEW],
   support: [PERMISSIONS.SUPPORT_VIEW],
+  "website-enquiries": [PERMISSIONS.SUPPORT_VIEW],
   staff: [PERMISSIONS.STAFF_VIEW],
   settings: [PERMISSIONS.SETTINGS_VIEW],
   "prohibited-items": [PERMISSIONS.SETTINGS_VIEW],
