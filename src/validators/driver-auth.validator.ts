@@ -164,7 +164,7 @@ export default () => {
             typeof req.files === "object" &&
             Object.keys(req.files).length > 0);
 
-        if (!hasFile) {
+        if (!hasFile && !req.body.vehicleId) {
           return res.status(400).json({
             rCode: 0,
             rMsg: "validation_error",

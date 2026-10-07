@@ -619,6 +619,23 @@ export const uploadRC = async (
   try {
     const driverId = (req as any).driverId;
 
+    const editId = String(req.body.vehicleId || "");
+    const number = VehicleLifecycle.normalizeVehicleNumber(req.body.vehicleNumber);
+    if (!number) { req.rCode = 0; req.msg = "Vehicle number is required"; return next(); }
+    let existing: any = null;
+    if (editId) {
+      if (!Types.ObjectId.isValid(editId)) { req.rCode = 0; req.msg = "Invalid vehicle"; return next(); }
+      existing = await VehicleModel.findOne({ _id: editId, driverId, isDeleted: { $ne: true } });
+      if (!existing || VehicleLifecycle.normalizeVehicleNumber(existing.vehicleNumber) !== number) {
+        req.rCode = 0; req.msg = "Vehicle not found, or registration number changed"; return next();
+      }
+    }
+    const conflict = await VehicleLifecycle.findVehicleConflict(number, driverId);
+    if (conflict.other || (conflict.own && !existing)) {
+      req.rCode = 0;
+      req.msg = "This vehicle number is already registered. Use Edit Vehicle to change your vehicle details.";
+      return next();
+    }
     // Handle upload.any() - files come as an array with fieldname property
     let rcFrontFile: Express.Multer.File | undefined;
     let rcBackFile: Express.Multer.File | undefined;
@@ -643,7 +660,7 @@ export const uploadRC = async (
       rcFrontFile = req.file;
     }
 
-    if (!rcFrontFile) {
+    if (!rcFrontFile && !existing) {
       req.rCode = 0;
       req.msg = "rc_front_image_required";
       return next();
@@ -651,29 +668,16 @@ export const uploadRC = async (
 
     // Upload RC images to AWS in parallel
     const uploads = await Promise.all([
-      fileUploadService.uploadFileToAws([rcFrontFile]),
+      rcFrontFile ? fileUploadService.uploadFileToAws([rcFrontFile]) : Promise.resolve(null),
       rcBackFile ? fileUploadService.uploadFileToAws([rcBackFile]) : Promise.resolve(null),
     ]);
 
-    const rcFrontUrl = uploads[0].images;
+    const rcFrontUrl = uploads[0]?.images || existing?.rcFrontImage;
     const rcBackUrl = uploads[1]?.images || "";
 
     if (!rcFrontUrl) {
       throw new Error("RC front upload failed");
     }
-
-    const kyc = await DriverKycService.upsertDriverKyc(
-      new Types.ObjectId(driverId),
-      {
-        vehicleRc: {
-          image: rcFrontUrl,
-          vehicleNumber: req.body.vehicleNumber,
-        },
-        ...(req.body.city && { city: req.body.city }),
-        ...(req.body.bodyType && { bodyType: req.body.bodyType }),
-        ...(req.body.fuelType && { fuelType: req.body.fuelType }),
-      },
-    );
 
     // ── Vehicle record ──
     const vehicleTypeMap: Record<string, string> = {
@@ -703,6 +707,10 @@ export const uploadRC = async (
     }
     const bodyType = VehicleLifecycle.normalizeBodyType(req.body.bodyType);
     const categoryCode = catalogType?.categoryCode || vehicleTypeMap[rawType];
+    if (rawVehicleTypeId && !catalogType) {
+      req.rCode = 0; req.msg = "Please select an active vehicle type"; return next();
+    }
+    const storedCategory = categoryCode === "HV" ? "4W" : categoryCode;
     const attrError = await VehicleLifecycle.validateVehicleAttributes(
       categoryCode,
       bodyType,
@@ -711,21 +719,6 @@ export const uploadRC = async (
     if (attrError) {
       req.rCode = 0;
       req.msg = attrError;
-      return next();
-    }
-
-    // Duplicate registration. A number held by ANOTHER partner is refused
-    // outright (this path used to accept it, and then re-pointed the dispatch
-    // row at the newcomer — partner B could take over partner A's vehicle).
-    // The same partner re-submitting their own number updates in place: that
-    // is the "duplicate entries when fuel type is changed" report.
-    const conflict = await VehicleLifecycle.findVehicleConflict(
-      req.body.vehicleNumber,
-      driverId,
-    );
-    if (conflict.other) {
-      req.rCode = 0;
-      req.msg = "vehicle_registered_to_another_partner";
       return next();
     }
 
@@ -741,17 +734,20 @@ export const uploadRC = async (
     };
 
     let vehicle: any;
-    if (conflict.own) {
-      vehicle = await VehicleModel.findById(conflict.own._id);
-      vehicle.rcFrontImage = rcFrontUrl;
-      if (rcBackUrl) vehicle.rcBackImage = rcBackUrl;
-      vehicle.vehicleType = vehicleTypeMap[rawType] || vehicle.vehicleType || "4W";
-      if (bodyType) vehicle.vehicleBodyType = bodyType;
-      if (fuelType) vehicle.fuelType = fuelType;
-      if (req.body.city) vehicle.city = req.body.city;
-      if (catalogType) vehicle.vehicleTypeId = catalogType._id;
-      for (const [k, v] of Object.entries(expiry)) if (v) (vehicle as any)[k] = v;
-      await vehicle.save();
+    if (existing) {
+      const result = await VehicleLifecycle.editPartnerVehicle(driverId, existing._id, {
+        rcFrontImage: rcFrontUrl, ...(rcBackUrl ? { rcBackImage: rcBackUrl } : {}),
+        vehicleType: storedCategory || existing.vehicleType,
+        ...(bodyType ? { vehicleBodyType: bodyType } : {}),
+        ...(fuelType ? { fuelType } : {}),
+        ...(req.body.city ? { city: req.body.city } : {}),
+        ...(catalogType ? { vehicleTypeId: catalogType._id } : {}),
+        ...Object.fromEntries(Object.entries(expiry)
+          .filter(([key]) => Object.prototype.hasOwnProperty.call(req.body, key))
+          .map(([key, value]) => [key, value ?? null])),
+      });
+      if (!result.ok) { req.rCode = 0; req.msg = result.msg; return next(); }
+      vehicle = result.vehicle;
     } else {
       const existingVehicles = await VehicleModel.countDocuments({
         driverId: new Types.ObjectId(driverId),
@@ -760,7 +756,7 @@ export const uploadRC = async (
       const vehicleData: any = {
         driverId: new Types.ObjectId(driverId),
         vehicleNumber: req.body.vehicleNumber,
-        vehicleType: vehicleTypeMap[rawType] || "4W",
+        vehicleType: storedCategory || "4W",
         rcFrontImage: rcFrontUrl,
         rcBackImage: rcBackUrl,
         // Only the first vehicle is the selected one; later additions stay
@@ -784,13 +780,29 @@ export const uploadRC = async (
       );
     }
 
+    const kyc = existing ? await DriverKycService.getDriverKyc(new Types.ObjectId(driverId)) : await DriverKycService.upsertDriverKyc(
+      new Types.ObjectId(driverId),
+      {
+        vehicleRc: {
+          image: rcFrontUrl,
+          vehicleNumber: req.body.vehicleNumber,
+        },
+        ...(req.body.city && { city: req.body.city }),
+        ...(req.body.bodyType && { bodyType: req.body.bodyType }),
+        ...(req.body.fuelType && { fuelType: req.body.fuelType }),
+      },
+    );
+
     // Check if driver already has license uploaded (for "add another vehicle" flow)
-    const hasLicense = !!(kyc.drivingLicense?.frontImage);
+    const hasLicense = !!(kyc?.drivingLicense?.frontImage);
 
     req.rData = { kyc, vehicleId: vehicle._id, hasLicense };
-    req.msg = "rc_uploaded";
+    req.msg = existing ? "Vehicle updated. Admin reapproval is required before new bookings." : "rc_uploaded";
     next();
-  } catch (error) {
+  } catch (error: any) {
+    if (error?.code === 11000) {
+      req.rCode = 0; req.msg = "This vehicle number is already registered."; return next();
+    }
     next(error);
   }
 };

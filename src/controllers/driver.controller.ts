@@ -175,37 +175,7 @@ export const getDashboard = async (
     // the driver's active dispatch row — regardless of which vehicle the
     // history/earnings figures are scoped to. (The scope filter is a Booking
     // field and must not be spread into this DriverVehicle query.)
-    const activeVehicle = await DriverVehicleModel.findOne({
-      driverId: driverObjectId,
-      isActive: true,
-      isDeleted: { $ne: true },
-    }).lean();
-
-    let pendingFilter: any = {
-      driverId: null,
-      status: { $in: DISCOVERABLE_BOOKING_STATUSES },
-    };
-
-    if (activeVehicle) {
-      // Filter by vehicle type
-      pendingFilter.vehicleTypeId = activeVehicle.vehicleTypeId;
-
-      // Filter by service type based on vehicle's allowed service types
-      const vehicleType = await VehicleTypeModel.findById(
-        activeVehicle.vehicleTypeId,
-      )
-        .select("allowIntraCity allowInterCity")
-        .lean();
-
-      if (vehicleType) {
-        const allowedServiceTypes: string[] = [];
-        if (vehicleType.allowIntraCity) allowedServiceTypes.push("WITHIN_CITY");
-        if (vehicleType.allowInterCity) allowedServiceTypes.push("OUTSTATION");
-        if (allowedServiceTypes.length > 0) {
-          pendingFilter.serviceType = { $in: allowedServiceTypes };
-        }
-      }
-    }
+    const pendingFilter = await BookingDispatchService.getDriverOfferFilter(driverId);
 
     const [
       driver,
@@ -290,7 +260,6 @@ export const getDashboard = async (
       BookingModel.countDocuments(pendingFilter),
       BookingModel.findOne({
         driverId: driverObjectId,
-        ...vehicleScope,
         status: { $in: ACTIVE_BOOKING_STATUSES },
       })
         .populate("userId", "fullName")
@@ -1251,54 +1220,7 @@ export const getRecommendedBookings = async (
     const driverId = (req as any).driverId;
     const driverObjectId = new Types.ObjectId(driverId);
 
-    const driver = await DriverModel.findById(driverId);
-    if (!driver?.isOnline) {
-      req.rData = [];
-      req.msg = "driver_offline";
-      return next();
-    }
-
-    // Block if driver already has an ongoing booking
-    const hasOngoing = await BookingModel.findOne({
-      driverId: driverObjectId,
-      status: { $in: ACTIVE_BOOKING_STATUSES },
-    });
-    if (hasOngoing) {
-      req.rData = [];
-      req.msg = "active_booking_exists";
-      return next();
-    }
-
-    // Get driver's active vehicle to filter by type and service
-    const activeVehicle = await DriverVehicleModel.findOne({
-      driverId: driverObjectId,
-      isActive: true,
-      isDeleted: { $ne: true },
-    }).lean();
-
-    const filter: any = {
-      status: { $in: DISCOVERABLE_BOOKING_STATUSES },
-      driverId: null,
-    };
-
-    if (activeVehicle) {
-      filter.vehicleTypeId = activeVehicle.vehicleTypeId;
-
-      const vehicleType = await VehicleTypeModel.findById(
-        activeVehicle.vehicleTypeId,
-      )
-        .select("allowIntraCity allowInterCity")
-        .lean();
-
-      if (vehicleType) {
-        const allowedServiceTypes: string[] = [];
-        if (vehicleType.allowIntraCity) allowedServiceTypes.push("WITHIN_CITY");
-        if (vehicleType.allowInterCity) allowedServiceTypes.push("OUTSTATION");
-        if (allowedServiceTypes.length > 0) {
-          filter.serviceType = { $in: allowedServiceTypes };
-        }
-      }
-    }
+    const filter = await BookingDispatchService.getDriverOfferFilter(driverId);
 
     const bookings = await BookingModel.find(filter)
       .populate("userId", "fullName")
@@ -1338,6 +1260,7 @@ export const getBookingHistory = async (
       .limit(Number(limit))
       .lean();
     for (const b of bookings as any[]) {
+      if (b?.receiverPhone) b.receiverPhone = presentPhone(b.receiverPhone);
       for (const loc of [b?.pickup, b?.drop, ...(Array.isArray(b?.stops) ? b.stops : [])]) {
         if (loc?.contactPhone) loc.contactPhone = presentPhone(loc.contactPhone);
       }
@@ -1420,34 +1343,6 @@ export const acceptBooking = async (
       return next();
     }
 
-    // Update driver status
-    await DriverModel.findByIdAndUpdate(driverId, {
-      currentBookingId: new Types.ObjectId(bookingId),
-    });
-
-    // Record WHICH vehicle is doing the trip (per-vehicle history/earnings).
-    try {
-      await VehicleLifecycle.stampVehicleOnBooking(bookingId, driverId);
-    } catch (stampErr) {
-      console.error("accept: vehicle stamp failed (non-fatal)", stampErr);
-    }
-
-    // Record the offer outcome: this driver ACCEPTED; every other driver's
-    // still-pending offer on this booking lapses now — their ring stopped the
-    // moment the job was taken.
-    try {
-      await DispatchOffer.updateOne(
-        { bookingId: new Types.ObjectId(bookingId), driverId },
-        { $set: { response: "ACCEPTED", respondedAt: new Date() } },
-      );
-      await DispatchOffer.updateMany(
-        { bookingId: new Types.ObjectId(bookingId), response: "PENDING" },
-        { $set: { response: "EXPIRED", respondedAt: new Date() } },
-      );
-    } catch (offerErr) {
-      console.error("accept: offer record failed (non-fatal)", offerErr);
-    }
-
     // Get updated booking
     const booking = await BookingModel.findById(bookingId)
       .populate("userId", "fullName")
@@ -1500,22 +1395,12 @@ export const rejectBooking = async (
     const driverId = (req as any).driverId;
     const { bookingId } = req.params;
 
-    // A skip is a real decision — record it against the persisted offer.
-    try {
-      await DispatchOffer.updateOne(
-        {
-          bookingId: new Types.ObjectId(bookingId),
-          driverId: (req as any).driverId,
-          response: "PENDING",
-        },
-        { $set: { response: "SKIPPED", respondedAt: new Date() } },
-      );
-    } catch (offerErr) {
-      console.error("reject: offer record failed (non-fatal)", offerErr);
+    const result = await BookingDispatchService.handleDriverRejection(bookingId, driverId);
+    if (!result.success) {
+      req.rCode = 0;
+      req.msg = result.message;
+      return next();
     }
-
-    // Use dispatch service to handle rejection
-    await BookingDispatchService.handleDriverRejection(bookingId, driverId);
 
     req.msg = "booking_rejected";
     next();
@@ -2633,9 +2518,9 @@ export const addVehicle = async (
       String(registrationNumber || ""),
       driverId,
     );
-    if (conflict.other) {
+    if (conflict.other || conflict.own) {
       req.rCode = 0;
-      req.msg = "vehicle_registered_to_another_partner";
+      req.msg = "This vehicle number is already registered. Use Edit Vehicle to update your vehicle.";
       return next();
     }
 
@@ -2730,6 +2615,14 @@ function scrubOtps<T>(booking: T): T {
       (booking as any).deliveryOtpRequired === true;
     delete (booking as any).otp;
     delete (booking as any).deliveryOtp;
+    const b: any = booking;
+    if (b.userId && typeof b.userId === "object" && b.userId.mobileNumber) {
+      b.userId.mobileNumber = presentPhone(b.userId.mobileNumber);
+    }
+    if (b.receiverPhone) b.receiverPhone = presentPhone(b.receiverPhone);
+    for (const loc of [b.pickup, b.drop, ...(Array.isArray(b.stops) ? b.stops : [])]) {
+      if (loc?.contactPhone) loc.contactPhone = presentPhone(loc.contactPhone);
+    }
   }
   return booking;
 }
@@ -4642,4 +4535,12 @@ export const activateMyVehicle = async (
   } catch (error) {
     next(error);
   }
+};
+
+export const getIncomingOffers = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    req.rData = await BookingDispatchService.getDriverOfferPayloads(String((req as any).driverId));
+    req.msg = "success";
+    next();
+  } catch (error) { next(error); }
 };

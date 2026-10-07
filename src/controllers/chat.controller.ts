@@ -41,14 +41,14 @@ export const getChatHistory = async (
       req.msg = "not_booking_party";
       return next();
     }
-    const page = parseInt(req.query.page as string) || 1;
-    const limit = parseInt(req.query.limit as string) || 50;
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
     const skip = (page - 1) * limit;
 
     const messages = await ChatMessage.find({
       bookingId: new Types.ObjectId(bookingId),
     })
-      .sort({ createdAt: 1 })
+      .sort({ createdAt: 1, _id: 1 })
       .skip(skip)
       .limit(limit)
       .lean();

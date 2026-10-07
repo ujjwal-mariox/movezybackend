@@ -322,27 +322,47 @@ export const initSocket = async (httpServer: HttpServer): Promise<Server> => {
     });
 
     // Handle chat messages — persist to DB and broadcast
-    socket.on("chat:message", async (data) => {
-      const { bookingId, message, messageType, imageUrl } = data;
+    socket.on("chat:message", async (data, ack) => {
+      const { bookingId, message, messageType, imageUrl, clientMessageId } = data || {};
+      const reply = (result: any) => { if (typeof ack === "function") ack(result); };
 
-      if (!bookingId || !socket.userId) return;
+      if (!bookingId || !socket.userId) { reply({ success: false }); return; }
 
       const party = await chatParty(bookingId, socket.userId, socket.userType);
       if (!party) {
         socket.emit("chat:error", { message: "You are not part of this booking" });
+        reply({ success: false });
         return;
       }
 
       try {
         // Save to database
-        const chatMsg = await ChatMessage.create({
+        const row = {
           bookingId: new Types.ObjectId(bookingId),
           senderId: new Types.ObjectId(socket.userId),
-          senderType: socket.userType === "DRIVER" ? "DRIVER" : "USER",
+          senderType: socket.userType === "DRIVER" ? "DRIVER" as const : "USER" as const,
           messageType: messageType || "TEXT",
           message: message || "",
           imageUrl: imageUrl || undefined,
-        });
+        };
+        // A retry after a lost acknowledgement must not create a second message.
+        const nonce = typeof clientMessageId === "string" && /^[a-f0-9]{24}$/.test(clientMessageId)
+          ? clientMessageId : undefined;
+        let chatMsg;
+        if (nonce) {
+          const identity = { bookingId: row.bookingId, senderId: row.senderId, clientMessageId: nonce };
+          try {
+            chatMsg = await ChatMessage.findOneAndUpdate(identity,
+              { $setOnInsert: { ...row, clientMessageId: nonce } }, { upsert: true, new: true });
+          } catch (error: any) {
+            if (error?.code !== 11000) throw error;
+            // Two retries can race the unique index; both refer to the same saved message.
+            chatMsg = await ChatMessage.findOne(identity);
+          }
+        } else {
+          chatMsg = await ChatMessage.create(row);
+        }
+        if (!chatMsg) throw new Error("Message could not be saved");
 
         const payload = {
           _id: chatMsg._id,
@@ -352,11 +372,13 @@ export const initSocket = async (httpServer: HttpServer): Promise<Server> => {
           message: chatMsg.message,
           messageType: chatMsg.messageType,
           imageUrl: chatMsg.imageUrl,
+          clientMessageId: chatMsg.clientMessageId,
           createdAt: chatMsg.createdAt.toISOString(),
         };
 
         // Broadcast to everyone in the booking room (including sender for confirmation)
         io!.to(`booking:${bookingId}`).emit("chat:message", payload);
+        reply({ success: true, message: payload });
 
         // App-level nudge for the other party — badge / notification even with
         // their chat screen closed. The message itself travels on the room.
@@ -372,6 +394,7 @@ export const initSocket = async (httpServer: HttpServer): Promise<Server> => {
       } catch (error) {
         console.error("Error saving chat message:", error);
         socket.emit("chat:error", { message: "Failed to send message" });
+        reply({ success: false });
       }
     });
 
@@ -395,10 +418,11 @@ export const initSocket = async (httpServer: HttpServer): Promise<Server> => {
 
     // Mark messages as read
     socket.on("chat:read", async (data) => {
-      const { bookingId } = data;
+      const { bookingId } = data || {};
       if (!bookingId || !socket.userId) return;
 
       try {
+        if (!(await chatParty(bookingId, socket.userId, socket.userType))) return;
         await ChatMessage.updateMany(
           {
             bookingId: new Types.ObjectId(bookingId),

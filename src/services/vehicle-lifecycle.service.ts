@@ -1,4 +1,4 @@
-import { Types } from "mongoose";
+import mongoose, { Types, type ClientSession } from "mongoose";
 import Vehicle from "../models/vehicle.model";
 import DriverVehicle from "../models/driver-vehicle.model";
 import VehicleType from "../models/vehicle-type.model";
@@ -82,10 +82,10 @@ export const validateVehicleAttributes = async (
 ): Promise<string | null> => {
   const fuel = fuelType ? String(fuelType).trim() : "";
   if (categoryCode === "2W") {
-    if (bodyType && !TWO_WHEELER_BODY_TYPES.some((b) => sameName(b, String(bodyType)))) {
+    if (!bodyType || !TWO_WHEELER_BODY_TYPES.some((b) => sameName(b, String(bodyType)))) {
       return "invalid_body_type_for_two_wheeler";
     }
-    if (fuel && !TWO_WHEELER_FUEL_TYPES.some((f) => sameName(f, fuel))) {
+    if (!fuel || !TWO_WHEELER_FUEL_TYPES.some((f) => sameName(f, fuel))) {
       return "invalid_fuel_type_for_two_wheeler";
     }
     return null;
@@ -93,7 +93,7 @@ export const validateVehicleAttributes = async (
   if (fuel) {
     const fuels = await activeMasterNames("fuel");
     const allowed = fuels.length ? fuels : [...FUEL_TYPES];
-    if (!allowed.some((f) => sameName(f, fuel))) return "invalid_fuel_type";
+    if (!allowed.some((f) => sameName(normalizeFuelType(f) ?? f, fuel))) return "invalid_fuel_type";
   }
   if (bodyType) {
     const bodies = await activeMasterNames("body");
@@ -168,7 +168,7 @@ export const findVehicleConflict = async (
  */
 export const syncDispatchRow = async (
   vehicle: any,
-  opts: { driverDocBlocked?: boolean } = {},
+  opts: { driverDocBlocked?: boolean; session?: ClientSession } = {},
 ): Promise<void> => {
   if (!vehicle?.vehicleNumber) return;
 
@@ -186,7 +186,7 @@ export const syncDispatchRow = async (
   let driverBlocked = opts.driverDocBlocked;
   if (driverBlocked === undefined) {
     const d = await Driver.findById(vehicle.driverId)
-      .select("documentBlock")
+      .select("documentBlock").session(opts.session ?? null)
       .lean();
     driverBlocked = !!(d as any)?.documentBlock?.blocked;
   }
@@ -208,7 +208,7 @@ export const syncDispatchRow = async (
         isDeleted: vehicle.isDeleted === true,
       },
     },
-    { upsert: true, new: true },
+    { upsert: true, new: true, session: opts.session },
   );
 };
 
@@ -216,28 +216,19 @@ export const syncDispatchRow = async (
 export const syncDriverDispatchRows = async (
   driverId: string | Types.ObjectId,
 ): Promise<void> => {
-  const d = await Driver.findById(driverId).select("documentBlock").lean();
-  const driverDocBlocked = !!(d as any)?.documentBlock?.blocked;
-  const vehicles = await Vehicle.find({
-    driverId: new Types.ObjectId(String(driverId)),
-  }).lean();
-  for (const v of vehicles) {
-    await syncDispatchRow(v, { driverDocBlocked });
-  }
-  // Ghost rows: dispatch entries whose registration no longer matches any of
-  // this driver's vehicle records (legacy formatting, re-registered numbers).
-  const liveNumbers = vehicles
-    .filter((v: any) => v.isDeleted !== true)
-    .map((v: any) => normalizeVehicleNumber(v.vehicleNumber))
-    .filter(Boolean);
-  await DriverVehicle.updateMany(
-    {
+  await mongoose.connection.transaction(async (session) => {
+    // Deriving rows and switching vehicles must observe the same selection.
+    const d = await Driver.findOneAndUpdate({ _id: driverId }, { $set: { updatedAt: new Date() } }, { new: true, session });
+    const driverDocBlocked = !!(d as any)?.documentBlock?.blocked;
+    const vehicles = await Vehicle.find({
       driverId: new Types.ObjectId(String(driverId)),
-      registrationNumber: { $nin: liveNumbers },
-      isActive: true,
-    },
-    { $set: { isActive: false, isOnline: false } },
-  );
+      isDeleted: { $ne: true },
+    }).session(session).lean();
+    await DriverVehicle.updateMany({ driverId }, { $set: { isActive: false, isOnline: false } }, { session });
+    for (const v of vehicles) {
+      await syncDispatchRow(v, { driverDocBlocked, session });
+    }
+  });
 };
 
 // ── Active (primary) vehicle ───────────────────────────────────────────────
@@ -260,32 +251,32 @@ export const setActiveVehicle = async (
   vehicleId: string | Types.ObjectId,
 ): Promise<{ ok: true; vehicle: any } | { ok: false; msg: string }> => {
   const did = new Types.ObjectId(String(driverId));
-  const vehicle = await Vehicle.findOne({
-    _id: vehicleId,
-    driverId: did,
-    isDeleted: { $ne: true },
-  });
-  if (!vehicle) return { ok: false, msg: "vehicle_not_found" };
-  if (vehicle.verificationStatus !== "approved")
-    return { ok: false, msg: "vehicle_not_approved" };
-  if (!vehicle.onboardingFeePaid) return { ok: false, msg: "vehicle_fee_unpaid" };
-  if ((vehicle as any).dispatchBlock?.blocked)
-    return { ok: false, msg: "vehicle_documents_expired" };
-
-  const activeTrip = await Booking.exists({
-    driverId: did,
-    status: { $in: ["ASSIGNED", "DRIVER_ARRIVED", "PICKED", "IN_PROGRESS"] },
-  });
-  if (activeTrip) return { ok: false, msg: "active_trip_in_progress" };
-
-  await Vehicle.updateMany(
-    { driverId: did, _id: { $ne: vehicle._id } },
-    { $set: { isPrimary: false } },
-  );
-  vehicle.isPrimary = true;
-  await vehicle.save();
-  await syncDriverDispatchRows(did);
-  return { ok: true, vehicle: vehicle.toObject() };
+  try {
+    const vehicle = await mongoose.connection.transaction(async (session) => {
+      const driver = await Driver.findOneAndUpdate({ _id: did }, { $set: { updatedAt: new Date() } }, { new: true, session });
+      if (!driver) throw new Error("driver_not_found");
+      if ((driver as any).documentBlock?.blocked) throw new Error("driver_documents_expired");
+      const selected = await Vehicle.findOne({ _id: vehicleId, driverId: did, isDeleted: { $ne: true } }).session(session);
+      if (!selected) throw new Error("vehicle_not_found");
+      if (selected.verificationStatus !== "approved") throw new Error("vehicle_not_approved");
+      if (!selected.onboardingFeePaid) throw new Error("vehicle_fee_unpaid");
+      if ((selected as any).dispatchBlock?.blocked) throw new Error("vehicle_documents_expired");
+      if (await Booking.exists({ driverId: did, status: { $in: ["ASSIGNED", "DRIVER_ARRIVED", "PICKED", "IN_PROGRESS"] } }).session(session)) {
+        throw new Error("active_trip_in_progress");
+      }
+      await Vehicle.updateMany({ driverId: did, _id: { $ne: selected._id } }, { $set: { isPrimary: false } }, { session });
+      selected.isPrimary = true;
+      await selected.save({ session });
+      await DriverVehicle.updateMany({ driverId: did }, { $set: { isActive: false, isOnline: false } }, { session });
+      const typeId = selected.vehicleTypeId || (await VehicleType.findOne({ categoryCode: selected.vehicleType,
+        isDefaultForCategory: true, isActive: true, isDeleted: false }).session(session))?._id;
+      if (!typeId) throw new Error("vehicle_type_not_found");
+      await DriverVehicle.findOneAndUpdate({ registrationNumber: normalizeVehicleNumber(selected.vehicleNumber) },
+        { $set: { driverId: did, vehicleTypeId: typeId, isActive: true, isDeleted: false } }, { upsert: true, new: true, session });
+      return selected.toObject();
+    });
+    return { ok: true, vehicle };
+  } catch (error: any) { return { ok: false, msg: error.message || "Unable to select vehicle" }; }
 };
 
 /**
@@ -298,20 +289,23 @@ export const ensurePrimaryAfterApproval = async (
   vehicle: any,
 ): Promise<void> => {
   const did = new Types.ObjectId(String(vehicle.driverId));
-  const currentPrimary = await Vehicle.findOne({
-    driverId: did,
-    isPrimary: true,
-    isDeleted: { $ne: true },
-  }).lean();
-  const primaryIsUsable =
-    currentPrimary && (currentPrimary as any).verificationStatus === "approved";
-  if (!primaryIsUsable) {
+  await mongoose.connection.transaction(async (session) => {
+    await Driver.updateOne({ _id: did }, { $set: { updatedAt: new Date() } }, { session });
+    const currentPrimary = await Vehicle.findOne({
+      driverId: did,
+      isPrimary: true,
+      isDeleted: { $ne: true },
+    }).session(session).lean();
+    const primaryIsUsable =
+      currentPrimary && (currentPrimary as any).verificationStatus === "approved";
+    const primaryId = primaryIsUsable ? currentPrimary!._id : vehicle._id;
     await Vehicle.updateMany(
-      { driverId: did, _id: { $ne: vehicle._id } },
+      { driverId: did, _id: { $ne: primaryId } },
       { $set: { isPrimary: false } },
+      { session },
     );
-    await Vehicle.updateOne({ _id: vehicle._id }, { $set: { isPrimary: true } });
-  }
+    await Vehicle.updateOne({ _id: primaryId }, { $set: { isPrimary: true } }, { session });
+  });
   await syncDriverDispatchRows(did);
 };
 
@@ -358,4 +352,28 @@ export const stampVehicleOnBooking = async (
     { _id: bookingId },
     { $set: { vehicleId: pick.vehicleId, vehicleNumber: pick.vehicleNumber } },
   );
+};
+
+/** Edit a vehicle in place, preserving its identity, fees and trip history. */
+export const editPartnerVehicle = async (driverId: string, vehicleId: string | Types.ObjectId, updates: any): Promise<any> => {
+  try {
+    const vehicle = await mongoose.connection.transaction(async (session) => {
+      // Acceptance and switching also write this driver, preventing a mid-trip edit race.
+      await Driver.updateOne({ _id: driverId }, { $set: { updatedAt: new Date() } }, { session });
+      if (await Booking.exists({ driverId, status: { $in: ["ASSIGNED", "DRIVER_ARRIVED", "PICKED", "IN_PROGRESS"] } }).session(session)) {
+        throw new Error("Complete the current trip before editing a vehicle.");
+      }
+      const current = await Vehicle.findOne({ _id: vehicleId, driverId, isDeleted: { $ne: true } }).session(session);
+      if (!current) throw new Error("Vehicle not found");
+      Object.assign(current, updates, { verificationStatus: "pending", rejectionReason: undefined });
+      await current.save({ session });
+      await DriverVehicle.updateMany({ driverId, registrationNumber: normalizeVehicleNumber(current.vehicleNumber) },
+        { $set: { isActive: false, isOnline: false } }, { session });
+      return current;
+    });
+    await syncDispatchRow(vehicle);
+    return { ok: true, vehicle };
+  } catch (error: any) {
+    return { ok: false, msg: error.message || "Unable to update vehicle" };
+  }
 };

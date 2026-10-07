@@ -29,6 +29,7 @@ import { generateBookingNumber } from "../services/booking-number.service";
 import { resolveBookingCity } from "../services/vehicle-rate.service";
 import { computeBookingTax } from "../services/tax.service";
 import { presentPhone } from "../services/call-masking.service";
+import { validRoutePoint, vehicleIneligibility, vehicleEligibilityMessage } from "../services/vehicle-eligibility.service";
 
 /** The driver's number as the customer may see it (masked when number hiding is on). */
 const maskDriver = <T,>(b: T): T => {
@@ -37,6 +38,23 @@ const maskDriver = <T,>(b: T): T => {
   return b;
 };
 import { Types } from "mongoose";
+
+/** Recheck at quote/booking time in case locations or the catalogue changed. */
+const rejectIneligibleBookingVehicle = async (res: Response, vehicleTypeId: string, distanceKm: number, serviceType?: string) => {
+  if (!Types.ObjectId.isValid(vehicleTypeId)) {
+    res.status(400).json({ success: false, code: "VEHICLE_UNAVAILABLE", message: "Choose an available vehicle for this trip." });
+    return true;
+  }
+  if (serviceType != null && !["WITHIN_CITY", "OUTSTATION"].includes(serviceType)) {
+    res.status(400).json({ success: false, code: "INVALID_SERVICE", message: "Choose Within City or Outstation." });
+    return true;
+  }
+  const type = await VehicleType.findById(vehicleTypeId);
+  const code = vehicleIneligibility(type, Number(distanceKm), serviceType);
+  if (!code) return false;
+  res.status(400).json({ success: false, code, message: vehicleEligibilityMessage(code, type, Number(distanceKm)) });
+  return true;
+};
 
 /** Guards against a client declaring a 10,000-floor building. */
 const MAX_FLOORS = 50;
@@ -170,13 +188,18 @@ export const getFareEstimate = async (req: Request, res: Response) => {
 
     let { distanceKm, durationMin } = req.body;
 
+    if ((pickup != null || drop != null) && (!validRoutePoint(pickup) || !validRoutePoint(drop)) ||
+        stops != null && (!Array.isArray(stops) || stops.some((s: any) => !validRoutePoint(s)))) {
+      return res.status(400).json({ success: false, code: "INVALID_LOCATIONS", message: "Choose pickup, drop and every stop on the map." });
+    }
+
     // Server-authoritative ROAD distance whenever coordinates are present —
     // overriding any client-sent figure. The old straight-line haversine
     // underquoted real road trips by ~25-35% (Delhi→Noida: 19.8 km straight
     // vs 26.3 km by road), and trusting the client's number let stale app
     // builds underquote themselves. Routed through stops in order; falls back
     // to haversine per-leg only if the router is unreachable.
-    if (pickup?.lat && pickup?.lng && drop?.lat && drop?.lng) {
+    if (validRoutePoint(pickup) && validRoutePoint(drop)) {
       const resolved = await getDistanceForLegs([
         pickup,
         ...(Array.isArray(stops)
@@ -190,12 +213,14 @@ export const getFareEstimate = async (req: Request, res: Response) => {
       }
     }
 
-    if (!distanceKm || !durationMin || !vehicleTypeId) {
+    if (!Number.isFinite(Number(distanceKm)) || Number(distanceKm) <= 0 || !Number.isFinite(Number(durationMin)) || Number(durationMin) <= 0 || !vehicleTypeId) {
       return res.status(400).json({
         success: false,
         message: "Distance, duration, and vehicle type are required. Provide either distanceKm/durationMin or pickup/drop coordinates.",
       });
     }
+
+    if (await rejectIneligibleBookingVehicle(res, vehicleTypeId, Number(distanceKm), serviceType)) return;
 
     const floors = resolveFloors(loadingUnloading);
     const resolvedAddons = await resolveAddonsForFare(
@@ -409,6 +434,10 @@ export const createBooking = async (req: Request, res: Response) => {
     // fallback when the router is unreachable.
     let bookingDistanceKm = distanceKm;
     let bookingDurationMin = durationMin;
+    if (hasRouteCoords && (!validRoutePoint(pickupLocation) || !validRoutePoint(dropLocation)) ||
+        stops != null && (!Array.isArray(stops) || stops.some((s: any) => !validRoutePoint(s)))) {
+      return res.status(400).json({ success: false, code: "INVALID_LOCATIONS", message: "Choose pickup, drop and every stop on the map." });
+    }
     if (hasRouteCoords) {
       const resolvedRoute = await getDistanceForLegs([
         pickupLocation,
@@ -422,6 +451,12 @@ export const createBooking = async (req: Request, res: Response) => {
         bookingDurationMin = resolvedRoute.durationMin;
       }
     }
+
+    if (!Number.isFinite(Number(bookingDistanceKm)) || Number(bookingDistanceKm) <= 0 ||
+        !Number.isFinite(Number(bookingDurationMin)) || Number(bookingDurationMin) <= 0) {
+      return res.status(400).json({ success: false, code: "INVALID_LOCATIONS", message: "Choose distinct pickup and drop locations on the map." });
+    }
+    if (await rejectIneligibleBookingVehicle(res, vehicleTypeId, Number(bookingDistanceKm), serviceType)) return;
 
     // Resolve addon details from database.
     // This used the same shape as the estimate but omitted `priceType`, so the
@@ -1845,71 +1880,37 @@ export const getBookingInvoice = async (req: Request, res: Response) => {
  */
 export const getVehicleOptions = async (req: Request, res: Response) => {
   try {
-    const { serviceType, goodsTypeId, pickup, drop, stops } = req.body;
+    const { serviceType, goodsTypeId, pickup, drop, stops, eligibilityOnly } = req.body;
     let { distanceKm, durationMin } = req.body;
-
-    // Road distance through the stops in order, resolved server-side whenever
-    // coordinates are present — the same figure getFareEstimate and
-    // createBooking use, so the vehicle list, the estimate and the final bill
-    // all price the same trip.
-    if (pickup?.lat && pickup?.lng && drop?.lat && drop?.lng) {
-      const resolved = await getDistanceForLegs([
-        pickup,
-        ...(Array.isArray(stops)
-          ? stops.filter((s: any) => s?.lat != null && s?.lng != null)
-          : []),
-        drop,
-      ]);
-      if (resolved) {
-        distanceKm = resolved.distanceKm;
-        durationMin = resolved.durationMin;
-      }
+    if (serviceType != null && !["WITHIN_CITY", "OUTSTATION"].includes(serviceType)) {
+      return res.status(400).json({ success: false, code: "INVALID_SERVICE", message: "Choose Within City or Outstation." });
     }
-
-    if (!distanceKm || !durationMin) {
-      // Coordinates were supplied but resolution produced nothing usable —
-      // never dead-end the customer on "no vehicles" for that. Fall back to
-      // the straight-line approximation (the figure this endpoint used before
-      // road routing) so the list still prices, and log the payload, since
-      // reaching here means the resolver misbehaved.
-      const pLat = Number(pickup?.lat);
-      const pLng = Number(pickup?.lng);
-      const dLat = Number(drop?.lat);
-      const dLng = Number(drop?.lng);
-      const haveCoords =
-        Number.isFinite(pLat) &&
-        Number.isFinite(pLng) &&
-        Number.isFinite(dLat) &&
-        Number.isFinite(dLng) &&
-        !(pLat === 0 && pLng === 0) &&
-        !(dLat === 0 && dLng === 0);
-
-      console.warn(
-        "[VehicleOptions] distance unresolved",
-        JSON.stringify({ pickup, drop, stops, distanceKm, durationMin }),
-      );
-
-      if (haveCoords) {
-        const R = 6371;
-        const dLatR = ((dLat - pLat) * Math.PI) / 180;
-        const dLngR = ((dLng - pLng) * Math.PI) / 180;
-        const h =
-          Math.sin(dLatR / 2) ** 2 +
-          Math.cos((pLat * Math.PI) / 180) *
-            Math.cos((dLat * Math.PI) / 180) *
-            Math.sin(dLngR / 2) ** 2;
-        // ×1.3 road approximation, matching the resolver's own fallback.
-        distanceKm =
-          Math.round(2 * R * Math.asin(Math.sqrt(h)) * 1.3 * 100) / 100;
-        durationMin = Math.max(5, Math.ceil((distanceKm / 25) * 60));
+    if (stops != null && (!Array.isArray(stops) || stops.some((s: any) => !validRoutePoint(s)))) {
+      return res.status(400).json({ success: false, code: "INVALID_LOCATIONS", message: "Choose every stop on the map, or remove the incomplete stop." });
+    }
+    let distanceSource = "provided";
+    if (pickup != null || drop != null || (Array.isArray(stops) && stops.length > 0)) {
+      if (!validRoutePoint(pickup) || !validRoutePoint(drop)) {
+        return res.status(400).json({ success: false, code: "INVALID_LOCATIONS", message: "Choose both pickup and drop locations on the map." });
       }
-
-      if (!distanceKm || !durationMin) {
-        return res.status(400).json({
-          success: false,
-          message: "Provide distanceKm/durationMin or pickup/drop coordinates",
-        });
+      const points = [pickup, ...(stops || []), drop];
+      if (points.every(p => Number(p.lat) === Number(pickup.lat) && Number(p.lng) === Number(pickup.lng))) {
+        return res.status(400).json({ success: false, code: "SAME_LOCATION", message: "Pickup and drop are at the same point. Choose a different drop location." });
       }
+      // Includes every stop. The routing service already handles router outages
+      // with a per-leg approximation; never replace this with a direct-only leg.
+      const resolved = await getDistanceForLegs(points);
+      if (!resolved) {
+        return res.status(503).json({ success: false, code: "ROUTE_UNAVAILABLE", message: "We couldn't check this route yet. Try again or choose the locations on the map." });
+      }
+      distanceKm = resolved.distanceKm;
+      durationMin = resolved.durationMin;
+      distanceSource = resolved.source;
+    }
+    distanceKm = Number(distanceKm);
+    durationMin = Number(durationMin);
+    if (!Number.isFinite(distanceKm) || distanceKm <= 0 || !Number.isFinite(durationMin) || durationMin <= 0) {
+      return res.status(400).json({ success: false, code: "INVALID_LOCATIONS", message: "We couldn't measure this trip. Choose distinct pickup and drop locations on the map." });
     }
 
     // Get all active vehicle types with caching
@@ -1926,7 +1927,7 @@ export const getVehicleOptions = async (req: Request, res: Response) => {
 
     // If goodsTypeId provided, get the goods type and FILTER vehicles
     let goodsType: any = null;
-    if (goodsTypeId) {
+    if (goodsTypeId && eligibilityOnly !== true) {
       goodsType = await GoodsType.findById(goodsTypeId);
     }
 
@@ -1937,11 +1938,8 @@ export const getVehicleOptions = async (req: Request, res: Response) => {
       (goodsType?.allowedVehicleTypes || []).map((id: any) => id.toString()),
     );
     const requestedService = serviceType || "WITHIN_CITY";
-    // Two-wheelers do not run outstation; everything else is offered there.
-    let filteredVehicleTypes = (vehicleTypes as any[]).filter(
-      (type: any) => !(requestedService === "OUTSTATION" && type.categoryCode === "2W"),
-    );
-    if (filteredVehicleTypes.length === 0) filteredVehicleTypes = vehicleTypes as any[];
+    const activeTypes = (vehicleTypes as any[]).filter(t => t.isActive !== false && t.isDeleted !== true);
+    let filteredVehicleTypes = activeTypes.filter(t => !vehicleIneligibility(t, distanceKm, requestedService));
     // The vehicle the customer picked on the home screen is always recommended.
     const preferredVehicleTypeId = String(req.body?.preferredVehicleTypeId || req.body?.vehicleTypeId || "");
 
@@ -1949,25 +1947,31 @@ export const getVehicleOptions = async (req: Request, res: Response) => {
       `[VehicleOptions] Total active: ${(vehicleTypes as any[]).length}, After filter: ${filteredVehicleTypes.length}, goodsTypeId: ${goodsTypeId || "none"}`
     );
 
-    // Max distance is a hard limit — a scooter is never offered a 400 km trip.
-    // Min distance and intra/inter-city only influence ranking (below).
-    const coversDistance = (t: any) =>
-      !(Number(t.maxRangeKm) > 0 && Number(distanceKm) > Number(t.maxRangeKm));
-    const inRange = filteredVehicleTypes.filter(coversDistance);
-    if (inRange.length === 0 && filteredVehicleTypes.length > 0) {
-      return res.json({
-        success: true,
-        data: [],
-        message: `No vehicle type covers a ${Math.round(Number(distanceKm))} km trip. Please contact support for long-distance moves.`,
-      });
+    const preferredType = activeTypes.find(t => String(t._id) === preferredVehicleTypeId);
+    const preferredCode = preferredVehicleTypeId ? vehicleIneligibility(preferredType, distanceKm, requestedService) : null;
+    const code = filteredVehicleTypes.length ? "AVAILABLE" : !activeTypes.length ? "NO_ACTIVE_VEHICLES"
+      : requestedService === "OUTSTATION" && activeTypes.every(t => t.categoryCode === "2W") ? "OUTSTATION_UNAVAILABLE" : "DISTANCE_LIMIT";
+    const eligibility = {
+      code, message: code === "AVAILABLE" ? null : vehicleEligibilityMessage(code, undefined, distanceKm),
+      distanceKm, durationMin, distanceSource,
+      availableCount: filteredVehicleTypes.length,
+      withinCityAvailableCount: activeTypes.filter(t => !vehicleIneligibility(t, distanceKm, "WITHIN_CITY")).length,
+      outstationAvailableCount: activeTypes.filter(t => !vehicleIneligibility(t, distanceKm, "OUTSTATION")).length,
+      preferredVehicle: preferredVehicleTypeId ? {
+        id: preferredVehicleTypeId, name: preferredType?.name, categoryCode: preferredType?.categoryCode,
+        maxRangeKm: preferredType?.maxRangeKm, code: preferredCode || "AVAILABLE",
+        message: preferredCode ? vehicleEligibilityMessage(preferredCode, preferredType, distanceKm) : null,
+      } : null,
+    };
+    if (eligibilityOnly === true || !filteredVehicleTypes.length) {
+      return res.json({ success: true, data: [], eligibility, message: eligibility.message });
     }
-    filteredVehicleTypes = inRange;
 
     // City-specific rate cards apply per vehicle type; resolved once here.
     const optionsCity = await resolveBookingCity(pickup);
 
     // Calculate fare for each vehicle type + recommendation score
-    const options = await Promise.all(
+    const quoted = await Promise.allSettled(
       filteredVehicleTypes.map(async (type: any) => {
         const fare = await FareService.calculateFare({
           vehicleTypeId: type._id,
@@ -1980,6 +1984,7 @@ export const getVehicleOptions = async (req: Request, res: Response) => {
           stops: Array.isArray(stops) ? stops.length : 0,
         });
 
+        if (!Number.isFinite(fare.finalFare) || fare.finalFare < 0) throw new Error("Invalid vehicle price");
         // Recommendation score (higher = better match)
         let score = 0;
 
@@ -2023,20 +2028,32 @@ export const getVehicleOptions = async (req: Request, res: Response) => {
       }),
     );
 
-    // Sort by score descending, mark top one as recommended — and the
-    // customer's own pick, which the app shows first under Recommended.
-    options.sort((a, b) => b.score - a.score);
-    if (options.length > 0) {
-      options[0].isRecommended = true;
+    // One unavailable rate card must not hide all the other usable vehicles.
+    const options = quoted.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
+    const unavailablePriceCount = quoted.length - options.length;
+    if (unavailablePriceCount) console.warn(`[VehicleOptions] ${unavailablePriceCount} prices unavailable`);
+    eligibility.availableCount = options.length;
+    if (unavailablePriceCount) {
+      eligibility.code = options.length ? "PARTIAL_PRICES" : "PRICES_UNAVAILABLE";
+      eligibility.message = options.length ? "Some vehicle prices are temporarily unavailable. You can choose from the vehicles below or try again." : vehicleEligibilityMessage("PRICES_UNAVAILABLE");
+      if (eligibility.preferredVehicle?.code === "AVAILABLE" && !options.some(o => String(o.vehicleType._id) === preferredVehicleTypeId)) {
+        eligibility.preferredVehicle.code = "PRICE_UNAVAILABLE";
+        eligibility.preferredVehicle.message = vehicleEligibilityMessage("PRICE_UNAVAILABLE");
+      }
     }
+    if (!options.length) return res.json({ success: true, data: [], eligibility, message: eligibility.message });
+
+    // Prefer the customer's choice; recommend exactly one eligible vehicle.
+    options.sort((a, b) => b.score - a.score);
     if (preferredVehicleTypeId) {
       const preferred = options.find((o: any) => String(o.vehicleType?._id) === preferredVehicleTypeId);
       if (preferred) {
-        preferred.isRecommended = true;
         options.splice(options.indexOf(preferred), 1);
         options.unshift(preferred);
       }
     }
+
+    if (options.length > 0) options[0].isRecommended = true;
 
     // Admin-managed automatic discount (strikethrough pricing). Attached per
     // option so the app can show original vs discounted; `fare` stays the
@@ -2069,11 +2086,15 @@ export const getVehicleOptions = async (req: Request, res: Response) => {
     res.json({
       success: true,
       data: withPricing,
+      eligibility,
+      message: eligibility.message,
     });
   } catch (error: any) {
+    console.error("[VehicleOptions] request failed", error);
     res.status(500).json({
       success: false,
-      message: error.message || "Failed to fetch vehicle options",
+      code: "VEHICLE_SERVICE_UNAVAILABLE",
+      message: "Vehicle prices are temporarily unavailable. Please try again.",
     });
   }
 };

@@ -4,10 +4,13 @@
  * and managing the auto-close mechanism when one driver accepts.
  */
 
-import { Types } from "mongoose";
+import mongoose, { Types } from "mongoose";
 import Booking from "../models/booking.model";
 import Driver from "../models/driver.model";
 import DriverVehicle from "../models/driver-vehicle.model";
+import DispatchOffer from "../models/dispatch-offer.model";
+import Vehicle from "../models/vehicle.model";
+import { normalizeVehicleNumber } from "./vehicle-lifecycle.service";
 import { getRedisClient, cache } from "../utils/redis.util";
 import { getIO, emitToUser, emitToBooking } from "../utils/socket.util";
 import * as mqttUtil from "../utils/mqtt.util";
@@ -276,8 +279,7 @@ export const findNearbyDrivers = async (
 //      record; a restart is covered by sweepExpiredOffers() and
 //      retryStalledSearches() from the job scheduler.
 //
-// DISPATCH_PARALLEL_OFFERS (AppConfig, default 1) rings that many nearest
-// drivers at once for operators who prefer a small race.
+// Offers are strictly sequential, regardless of older parallel-offer settings.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const BOOKING_QUEUE_KEY = "booking:queue:"; // list of {driverId, distance} nearest first
@@ -301,11 +303,11 @@ let settingsCache: { value: DispatchSettings; at: number } | null = null;
 export const dispatchSettings = async (): Promise<DispatchSettings> => {
   if (settingsCache && Date.now() - settingsCache.at < 60_000) return settingsCache.value;
   let offerSeconds = BOOKING_REQUEST_TIMEOUT_SECONDS;
-  let parallelOffers = 1;
+  const parallelOffers = 1;
   try {
     const { AppConfig } = await import("../models/app-config.model");
     const rows = await AppConfig.find({
-      key: { $in: ["DISPATCH_OFFER_SECONDS", "DISPATCH_PARALLEL_OFFERS"] },
+      key: "DISPATCH_OFFER_SECONDS",
     })
       .select("key value")
       .lean();
@@ -313,9 +315,6 @@ export const dispatchSettings = async (): Promise<DispatchSettings> => {
       const n = Number(r.value);
       if (r.key === "DISPATCH_OFFER_SECONDS" && Number.isFinite(n) && n >= 10 && n <= 120) {
         offerSeconds = Math.round(n);
-      }
-      if (r.key === "DISPATCH_PARALLEL_OFFERS" && Number.isFinite(n) && n >= 1 && n <= 10) {
-        parallelOffers = Math.round(n);
       }
     }
   } catch {
@@ -344,17 +343,14 @@ const clearDispatchState = async (bookingId: string, keepDeclined = false): Prom
   await redis.del(keys);
 };
 
-/** Offers still inside their window. Expired entries are pruned as a side effect. */
+/** Mongo is authoritative even after a Redis restart. */
 const liveOffers = async (bookingId: string): Promise<string[]> => {
-  const redis = getRedisClient();
-  const all = await redis.hGetAll(offersKey(bookingId));
-  const live: string[] = [];
-  for (const [driverId, exp] of Object.entries(all)) {
-    if (Number(exp) > Date.now()) live.push(driverId);
-    else await redis.hDel(offersKey(bookingId), driverId);
-  }
-  return live;
+  const rows = await DispatchOffer.find({ bookingId, response: "PENDING", expiresAt: { $gt: new Date() } })
+    .select("driverId").lean();
+  return rows.map((row) => String(row.driverId));
 };
+
+export const getBookingOfferDriverIds = liveOffers;
 
 /**
  * The same gate findNearbyDrivers applies, re-run at the moment of the offer:
@@ -434,6 +430,9 @@ const rebuildQueue = async (bookingId: string, booking: any, startRound: number)
   if (!pickupLat || !pickupLng || !vehicleTypeId) return false;
 
   const excluded = new Set<string>(await redis.sMembers(declinedKey(bookingId)));
+  const answered = await DispatchOffer.find({ bookingId, response: { $in: ["SKIPPED", "EXPIRED"] } })
+    .select("driverId").lean();
+  for (const row of answered) excluded.add(String(row.driverId));
   for (const d of await liveOffers(bookingId)) excluded.add(d);
 
   for (let round = Math.max(0, startRound); round < RADIUS_STEPS_KM.length; round++) {
@@ -522,16 +521,32 @@ export const offerNext = async (bookingId: string): Promise<string[]> => {
 
       try {
         const DispatchOffer = (await import("../models/dispatch-offer.model")).default;
-        await DispatchOffer.findOneAndUpdate(
+        const persisted = await mongoose.connection.transaction(async (session) => {
+          const driver = await Driver.findOneAndUpdate({ _id: driverId, isOnline: true, status: "approved" },
+            { $set: { updatedAt: new Date() } }, { new: true, session });
+          if (!driver) return false;
+          if (await Booking.exists({ driverId, status: { $in: ["ASSIGNED", "DRIVER_ARRIVED", "PICKED", "IN_PROGRESS"] } }).session(session)) return false;
+          if (await DispatchOffer.exists({ driverId, response: "PENDING", expiresAt: { $gt: new Date() } }).session(session)) return false;
+          const available = await Booking.findOneAndUpdate({ _id: bookingId, driverId: null,
+            status: { $in: ["SEARCHING", "PENDING"] } }, { $set: { updatedAt: new Date() } }, { new: true, session });
+          if (!available) return false;
+          if (await DispatchOffer.exists({ bookingId, response: "PENDING", expiresAt: { $gt: new Date() } }).session(session)) return false;
+          if (!await DriverVehicle.exists({ driverId, vehicleTypeId, isActive: true, isDeleted: { $ne: true } }).session(session)) return false;
+          await DispatchOffer.findOneAndUpdate(
           { bookingId: booking._id, driverId },
           {
             $set: { expiresAt: new Date(expiresAt), response: "PENDING", respondedAt: undefined },
             $setOnInsert: { offeredAt: new Date() },
           },
-          { upsert: true },
+          { upsert: true, session },
         );
+          return true;
+        });
+        if (!persisted) continue;
       } catch (offerErr) {
-        console.error("dispatch: offer persist failed (non-fatal)", offerErr);
+        // Never ring an offer that cannot be verified at acceptance.
+        await redis.lPush(queueKey(bookingId), raw);
+        throw offerErr;
       }
 
       await redis.setEx(`${DRIVER_PENDING_BOOKING_KEY}${driverId}`, offerSeconds, bookingId);
@@ -614,10 +629,12 @@ export const dispatchBookingToDrivers = async (
     if (fresh) await clearDispatchState(bookingId);
     else await redis.del(queueKey(bookingId));
 
-    await Booking.findByIdAndUpdate(bookingId, {
+    const searching = await Booking.findOneAndUpdate({ _id: bookingId, driverId: null,
+      status: { $in: ["SEARCHING", "PENDING"] } }, { $set: {
       status: "SEARCHING",
       ...(fresh || !booking.searchStartedAt ? { searchStartedAt: new Date() } : {}),
-    });
+    } }, { new: true });
+    if (!searching) return { success: false, driversNotified: 0, driverIds: [], message: "Booking is no longer searching for a driver" };
 
     const built = await rebuildQueue(bookingId, booking, 0);
     if (!built) {
@@ -667,22 +684,10 @@ export const dispatchBookingToDrivers = async (
 const handleOfferTimeout = async (bookingId: string, driverId: string): Promise<void> => {
   const redis = getRedisClient();
   const DispatchOffer = (await import("../models/dispatch-offer.model")).default;
-  const [expRaw, offerDoc] = await Promise.all([
-    redis.hGet(offersKey(bookingId), driverId),
-    DispatchOffer.findOne({ bookingId: new Types.ObjectId(bookingId), driverId: new Types.ObjectId(driverId) })
-      .select("response expiresAt")
-      .lean(),
-  ]);
-  const stillPending = offerDoc?.response === "PENDING";
-  if (!expRaw && !stillPending) return; // answered or already handled
-  const expiresAt = expRaw ? Number(expRaw) : new Date(offerDoc!.expiresAt).getTime();
-  if (expiresAt > Date.now() + 500) return; // window refreshed
-
+  const result = await DispatchOffer.updateOne({ bookingId, driverId, response: "PENDING",
+    expiresAt: { $lte: new Date() } }, { $set: { response: "EXPIRED", respondedAt: new Date() } });
+  if (!result.modifiedCount) return;
   await redis.hDel(offersKey(bookingId), driverId);
-  await DispatchOffer.updateOne(
-    { bookingId: new Types.ObjectId(bookingId), driverId: new Types.ObjectId(driverId), response: "PENDING" },
-    { $set: { response: "EXPIRED", respondedAt: new Date() } },
-  );
   const pending = await redis.get(`${DRIVER_PENDING_BOOKING_KEY}${driverId}`);
   if (pending === bookingId) await redis.del(`${DRIVER_PENDING_BOOKING_KEY}${driverId}`);
   await redis.sAdd(declinedKey(bookingId), driverId);
@@ -759,87 +764,66 @@ export const handleDriverAcceptance = async (
   bookingId: string,
   driverId: string,
 ): Promise<{ success: boolean; message: string }> => {
+  let committed = false;
   try {
+    if (!Types.ObjectId.isValid(bookingId) || !Types.ObjectId.isValid(driverId)) {
+      return { success: false, message: "Invalid booking or driver" };
+    }
+    const training = await getTrainingGateStatus(driverId);
+    if (training.required && !training.complete) {
+      return { success: false, message: "Complete mandatory training before accepting bookings" };
+    }
+    // Mongo owns the offer and assignment together. Redis is a delivery cache,
+    // so losing it must neither allow outsiders to accept nor lose a valid offer.
+    const updatedBooking: any = await mongoose.connection.transaction(async (session) => {
+      const booking = await Booking.findOne({
+        _id: bookingId, status: { $in: ["SEARCHING", "PENDING"] }, driverId: null,
+      }).session(session);
+      if (!booking) throw new Error("Booking is no longer available");
+      const driver = await Driver.findOne({
+        _id: driverId, isOnline: true, status: "approved",
+      }).session(session);
+      if (!driver) throw new Error("Driver is not online or not approved");
+      const busy = await Booking.exists({
+        driverId, status: { $in: ["ASSIGNED", "DRIVER_ARRIVED", "PICKED", "IN_PROGRESS"] },
+      }).session(session);
+      if (busy) throw new Error("Complete your active booking before accepting a new one");
+      const hasVehicle = await DriverVehicle.findOne({
+        driverId, vehicleTypeId: booking.vehicleTypeId,
+        isActive: true, isDeleted: { $ne: true },
+      }).session(session);
+      if (!hasVehicle) throw new Error("You don't have an active vehicle of the required type");
+      const vehicle = await Vehicle.findOne({
+        driverId,
+        isPrimary: true, verificationStatus: "approved", isDeleted: { $ne: true },
+      }).session(session);
+      if (!vehicle || normalizeVehicleNumber(vehicle.vehicleNumber) !== normalizeVehicleNumber(hasVehicle.registrationNumber)) {
+        throw new Error("Your selected vehicle is not approved for bookings");
+      }
+      if (vehicle.vehicleTypeId && String(vehicle.vehicleTypeId) !== String(booking.vehicleTypeId)) {
+        throw new Error("Your selected vehicle does not match this booking category");
+      }
+      const now = new Date();
+      const offer = await DispatchOffer.findOneAndUpdate({
+        bookingId, driverId, response: "PENDING", expiresAt: { $gt: now },
+      }, { $set: { response: "ACCEPTED", respondedAt: now } }, { new: true, session });
+      if (!offer) throw new Error("This offer has expired or is no longer yours");
+      const assigned = await Booking.findOneAndUpdate({
+        _id: bookingId, status: { $in: ["SEARCHING", "PENDING"] }, driverId: null,
+      }, { $set: {
+        driverId: new Types.ObjectId(driverId), status: "ASSIGNED", assignedAt: now,
+        vehicleId: vehicle._id, vehicleNumber: hasVehicle.registrationNumber,
+      } }, { new: true, session }).populate("userId", "fullName fcmToken");
+      if (!assigned) throw new Error("Booking is no longer available");
+      // A write on the driver also serializes acceptance of two different jobs.
+      await Driver.updateOne({ _id: driverId }, { $set: { currentBookingId: assigned._id } }, { session });
+      await DispatchOffer.updateMany({
+        bookingId, driverId: { $ne: new Types.ObjectId(driverId) }, response: "PENDING",
+      }, { $set: { response: "EXPIRED", respondedAt: now } }, { session });
+      return assigned;
+    });
+    committed = true;
     const redis = getRedisClient();
-
-    const booking = await Booking.findById(bookingId);
-    if (!booking) {
-      return { success: false, message: "Booking not found" };
-    }
-    if (booking.status !== "SEARCHING" && booking.status !== "PENDING") {
-      return { success: false, message: "Booking is no longer available" };
-    }
-    if (booking.driverId) {
-      return { success: false, message: "Booking already assigned to another driver" };
-    }
-
-    // The vehicle-category rule is checked on EVERY accept, offered or not: a
-    // two-wheeler partner must never end up on a three-wheeler job because a
-    // stale offer was still on their screen.
-    const hasVehicle = await DriverVehicle.findOne({
-      driverId: new Types.ObjectId(driverId),
-      vehicleTypeId: booking.vehicleTypeId,
-      isActive: true,
-      isDeleted: { $ne: true },
-    }).select("_id registrationNumber");
-    if (!hasVehicle) {
-      return {
-        success: false,
-        message: "You don't have an active vehicle of the required type",
-      };
-    }
-
-    // Fast path: the driver holds the offer. Fallback: the offer set lives in
-    // Redis and can be lost on a restart — verify against the DB instead of
-    // refusing a legitimate accept; the atomic update below still prevents
-    // double assignment.
-    const wasNotified = await redis.sIsMember(`${BOOKING_DRIVERS_KEY}${bookingId}`, driverId);
-    if (!wasNotified) {
-      const driver = await Driver.findOne({ _id: driverId, isOnline: true, status: "approved" }).select("_id");
-      if (!driver) {
-        return { success: false, message: "Driver is not online or not approved" };
-      }
-      const hasActiveBooking = await Booking.findOne({
-        driverId: new Types.ObjectId(driverId),
-        status: { $in: ["ASSIGNED", "DRIVER_ARRIVED", "PICKED", "IN_PROGRESS"] },
-      }).select("_id");
-      if (hasActiveBooking) {
-        return { success: false, message: "Complete your active booking before accepting a new one" };
-      }
-    }
-
-    const updatedBooking = await Booking.findOneAndUpdate(
-      { _id: bookingId, status: { $in: ["SEARCHING", "PENDING"] }, driverId: null },
-      {
-        $set: {
-          driverId: new Types.ObjectId(driverId),
-          status: "ASSIGNED",
-          assignedAt: new Date(),
-          ...(hasVehicle.registrationNumber ? { vehicleNumber: hasVehicle.registrationNumber } : {}),
-        },
-      },
-      { new: true },
-    ).populate("userId", "fullName fcmToken");
-
-    if (!updatedBooking) {
-      return { success: false, message: "Booking already assigned to another driver" };
-    }
-
-    // Record the outcome on every offer for this booking.
-    try {
-      const DispatchOffer = (await import("../models/dispatch-offer.model")).default;
-      await DispatchOffer.updateOne(
-        { bookingId: booking._id, driverId: new Types.ObjectId(driverId) },
-        { $set: { response: "ACCEPTED", respondedAt: new Date() } },
-      );
-      await DispatchOffer.updateMany(
-        { bookingId: booking._id, driverId: { $ne: new Types.ObjectId(driverId) }, response: "PENDING" },
-        { $set: { response: "EXPIRED", respondedAt: new Date() } },
-      );
-    } catch {
-      /* non-fatal */
-    }
-
     const notifiedDrivers = await redis.sMembers(`${BOOKING_DRIVERS_KEY}${bookingId}`);
     for (const otherDriverId of notifiedDrivers) {
       if (otherDriverId === driverId) continue;
@@ -907,6 +891,7 @@ export const handleDriverAcceptance = async (
     return { success: true, message: "Booking accepted successfully" };
   } catch (error: any) {
     console.error("Error handling driver acceptance:", error);
+    if (committed) return { success: true, message: "Booking accepted successfully" };
     return { success: false, message: error.message || "Failed to accept booking" };
   }
 };
@@ -918,7 +903,18 @@ export const handleDriverRejection = async (
   bookingId: string,
   driverId: string,
 ): Promise<{ success: boolean; message: string }> => {
+  let declined = false;
   try {
+    if (!Types.ObjectId.isValid(bookingId) || !Types.ObjectId.isValid(driverId)) {
+      return { success: false, message: "Invalid booking or driver" };
+    }
+    const claimed = await DispatchOffer.updateOne({
+      bookingId, driverId, response: "PENDING", expiresAt: { $gt: new Date() },
+    }, { $set: { response: "SKIPPED", respondedAt: new Date() } });
+    if (!claimed.modifiedCount) {
+      return { success: false, message: "This offer has expired or is no longer yours" };
+    }
+    declined = true;
     const redis = getRedisClient();
     await redis.del(`${DRIVER_PENDING_BOOKING_KEY}${driverId}`);
     await redis.hDel(offersKey(bookingId), driverId);
@@ -935,11 +931,12 @@ export const handleDriverRejection = async (
     }
 
     // Next nearest, right away.
-    offerNext(bookingId).catch((e) => console.error("dispatch: advance after decline failed", e));
+    await offerNext(bookingId).catch((e) => console.error("dispatch: advance after decline failed", e));
 
     return { success: true, message: "Booking rejected" };
   } catch (error: any) {
     console.error("Error handling driver rejection:", error);
+    if (declined) return { success: true, message: "Booking declined. Looking for the next driver." };
     return { success: false, message: error.message || "Failed to reject booking" };
   }
 };
@@ -995,4 +992,36 @@ export default {
   handleDriverAcceptance,
   handleDriverRejection,
   cancelBookingDispatch,
+};
+
+export const getDriverOfferFilter = async (driverId: string): Promise<any> => {
+  const empty = { _id: { $in: [] } };
+  if (!Types.ObjectId.isValid(driverId)) return empty;
+  const driver = await Driver.findOne({ _id: driverId, isOnline: true, status: "approved" }).lean();
+  if (!driver || await Booking.exists({
+    driverId, status: { $in: ["ASSIGNED", "DRIVER_ARRIVED", "PICKED", "IN_PROGRESS"] },
+  })) return empty;
+  const vehicle = await DriverVehicle.findOne({ driverId, isActive: true, isDeleted: { $ne: true } }).lean();
+  if (!vehicle) return empty;
+  const offers = await DispatchOffer.find({ driverId, response: "PENDING", expiresAt: { $gt: new Date() } })
+    .select("bookingId").lean();
+  return {
+    _id: { $in: offers.map((offer) => offer.bookingId) },
+    driverId: null, status: { $in: ["SEARCHING", "PENDING"] }, vehicleTypeId: vehicle.vehicleTypeId,
+  };
+};
+
+/** Polling is a second delivery channel when mobile sockets are suspended. */
+export const getDriverOfferPayloads = async (driverId: string): Promise<any[]> => {
+  const filter = await getDriverOfferFilter(driverId);
+  const bookings = await Booking.find(filter).populate("vehicleTypeId", "name icon").lean();
+  if (!bookings.length) return [];
+  const offers = await DispatchOffer.find({ driverId, bookingId: { $in: bookings.map(b => b._id) },
+    response: "PENDING", expiresAt: { $gt: new Date() } }).lean();
+  return bookings.flatMap(booking => {
+    const offer = offers.find(o => String(o.bookingId) === String(booking._id));
+    if (!offer) return [];
+    const expiry = new Date(offer.expiresAt).getTime();
+    return [buildOfferPayload(booking, expiry, Math.max(1, Math.ceil((expiry - Date.now()) / 1000)))];
+  });
 };

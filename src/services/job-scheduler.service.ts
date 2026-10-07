@@ -194,9 +194,9 @@ const autoAssign = async (): Promise<void> => {
   const enabled = await getConfig("auto_assign_scheduler_enabled");
   if (!(enabled === true || enabled === "true")) return;
   const result = await runAutoAssignSweep();
-  if (result.assigned > 0) {
+  if (result.offered > 0) {
     console.log(
-      `[scheduler] auto-assign: ${result.assigned}/${result.evaluated} bookings assigned`,
+      `[scheduler] dispatch: ${result.offered}/${result.evaluated} bookings offered to nearest drivers`,
     );
   }
 };

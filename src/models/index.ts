@@ -66,6 +66,9 @@ mongoose.set("strictPopulate", false);
 export const connectDB = async (): Promise<void> => {
   try {
     await mongoose.connect(config.database.url, config.database.options);
+    // Chat retries rely on the unique message identity. Finish index setup
+    // before opening the HTTP/socket listeners to concurrent message sends.
+    await ChatMessage.init();
     console.log("✅ Connected to MongoDB");
   } catch (error) {
     console.error("❌ Error connecting to MongoDB:", error);

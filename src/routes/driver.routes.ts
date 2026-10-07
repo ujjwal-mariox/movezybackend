@@ -13,6 +13,8 @@ const driverRouter = Router();
 // Apply driver auth middleware to all routes
 driverRouter.use(DriverAuthMiddleware().verifyDriverToken);
 
+driverRouter.get("/bookings/offers", ErrorHandlerMiddleware(DriverController.getIncomingOffers), ResponseMiddleware);
+
 // =====================
 // PROFILE
 // =====================

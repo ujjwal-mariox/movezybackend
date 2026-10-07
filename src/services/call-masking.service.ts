@@ -1,34 +1,16 @@
 import { Types } from "mongoose";
 import config from "../config";
-import { AppConfig } from "../models/app-config.model";
 import CallLog from "../models/call-log.model";
 import { toE164 } from "./sms.service";
 
 /**
- * Number masking ("proxy calling").
- *
- * Neither party is shown the other's real number. A call is placed through
- * the telephony provider: the provider first rings the person who tapped
- * Call, then bridges them to the other party, and BOTH handsets display only
- * the platform's voice number. The apps never receive the real numbers when
- * masking is on — they get "XXXXXX1234" for display plus a Call button that
- * hits POST .../call.
- *
- * Provider: Twilio Programmable Voice, using the same account the SMS
- * integration already uses. Configuration (env):
- *   CALL_MASKING_PROVIDER = twilio | none   (default: twilio when the Twilio
- *                                           SID/token are present)
- *   TWILIO_VOICE_NUMBER   = the voice-capable number both parties see
- *                           (falls back to TWILIO_PHONE_NUMBER)
- * Admin-editable (AppConfig):
- *   CALL_MASKING_FALLBACK_DIRECT = "true" (default) | "false" — when the
- *       bridge is not configured or fails, hand the app the real number so
- *       the trip is never blocked; "false" makes calling unavailable instead.
- *   HIDE_CONTACT_NUMBERS = "true" | "false" — force masking of numbers in app
- *       payloads even without a provider (Call then falls back to DIRECT).
+ * Bridge calls with a platform caller ID. Other-party numbers are always
+ * masked. Provider failure returns UNAVAILABLE; it never exposes a number.
+ * Configure CALL_MASKING_PROVIDER=twilio, TWILIO_ACCOUNT_SID,
+ * TWILIO_AUTH_TOKEN and TWILIO_VOICE_NUMBER on the server.
  */
 
-export type CallMode = "BRIDGE" | "DIRECT" | "UNAVAILABLE";
+export type CallMode = "BRIDGE" | "UNAVAILABLE";
 
 export interface CallParty {
   role: "USER" | "DRIVER";
@@ -39,8 +21,6 @@ export interface CallParty {
 export interface CallBridgeResult {
   mode: CallMode;
   message: string;
-  /** Only present for DIRECT: the number the app should dial itself. */
-  number?: string;
   callId?: string;
 }
 
@@ -65,52 +45,10 @@ export const maskPhone = (phone: string | null | undefined): string => {
   return `XXXXXX${digits.slice(-4)}`;
 };
 
-// ── Cached flags (sync readers such as payload mappers use these) ──────────
-let flagCache: { hide: boolean; fallbackDirect: boolean; at: number } = {
-  hide: isMaskingConfigured(),
-  fallbackDirect: true,
-  at: 0,
-};
-const FLAG_TTL_MS = 60 * 1000;
-let refreshing: Promise<void> | null = null;
-
-const refreshFlags = async (): Promise<void> => {
-  try {
-    const rows = await AppConfig.find({
-      key: { $in: ["HIDE_CONTACT_NUMBERS", "CALL_MASKING_FALLBACK_DIRECT"] },
-    })
-      .select("key value")
-      .lean();
-    const byKey: Record<string, any> = {};
-    for (const r of rows as any[]) byKey[r.key] = r.value;
-    const hideFlag = String(byKey.HIDE_CONTACT_NUMBERS ?? "").toLowerCase() === "true";
-    const fallback = String(byKey.CALL_MASKING_FALLBACK_DIRECT ?? "true").toLowerCase() !== "false";
-    flagCache = { hide: isMaskingConfigured() || hideFlag, fallbackDirect: fallback, at: Date.now() };
-  } catch {
-    flagCache = { ...flagCache, at: Date.now() };
-  }
-};
-
-export const ensureFlags = async (): Promise<void> => {
-  if (Date.now() - flagCache.at < FLAG_TTL_MS) return;
-  if (!refreshing) refreshing = refreshFlags().finally(() => (refreshing = null));
-  await refreshing;
-};
-
-/**
- * Sync: should app payloads hide real numbers right now? Kicks off a refresh
- * in the background when the cache is stale so mappers never block.
- */
-export const numbersHidden = (): boolean => {
-  if (Date.now() - flagCache.at >= FLAG_TTL_MS && !refreshing) {
-    refreshing = refreshFlags().finally(() => (refreshing = null));
-  }
-  return flagCache.hide;
-};
-
-/** Phone as it may be shown to the OTHER party. */
-export const presentPhone = (phone: string | null | undefined): string =>
-  numbersHidden() ? maskPhone(phone) : String(phone || "");
+// Privacy applies even when the provider is unavailable.
+export const ensureFlags = async (): Promise<void> => {};
+export const numbersHidden = (): boolean => true;
+export const presentPhone = (phone: string | null | undefined): string => maskPhone(phone);
 
 // ── Rate limit: a party may start at most N bridges per booking per window ──
 const MAX_CALLS_PER_WINDOW = 6;
@@ -198,16 +136,13 @@ export const bridgeCall = async (params: {
     };
   }
 
-  const directFallback = (): CallBridgeResult =>
-    flagCache.fallbackDirect
-      ? { mode: "DIRECT", number: targetDigits, message: "Connecting you directly." }
-      : {
-          mode: "UNAVAILABLE",
-          message: "Calling is temporarily unavailable. Please use chat or contact support.",
-        };
+  const unavailable = (): CallBridgeResult => ({
+    mode: "UNAVAILABLE",
+    message: "Calling is temporarily unavailable. Please use chat or contact support.",
+  });
 
   if (!isMaskingConfigured()) {
-    const r = directFallback();
+    const r = unavailable();
     await CallLog.create({ ...base, mode: r.mode, error: "masking not configured" });
     return r;
   }
@@ -215,7 +150,7 @@ export const bridgeCall = async (params: {
   const from = toE164(String(params.initiator.phone || ""));
   const to = toE164(targetDigits);
   if (!from || !to) {
-    const r = directFallback();
+    const r = unavailable();
     await CallLog.create({ ...base, mode: r.mode, error: "number not dialable" });
     return r;
   }
@@ -230,7 +165,7 @@ export const bridgeCall = async (params: {
     };
   } catch (e: any) {
     console.error("call-masking: bridge failed", e?.message || e);
-    const r = directFallback();
+    const r = unavailable();
     await CallLog.create({ ...base, mode: r.mode, provider: "twilio", error: String(e?.message || e) });
     return r;
   }

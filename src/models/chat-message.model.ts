@@ -7,6 +7,7 @@ export interface IChatMessage extends Document {
   messageType: "TEXT" | "IMAGE";
   message: string;
   imageUrl?: string;
+  clientMessageId?: string;
   isRead: boolean;
   createdAt: Date;
   updatedAt: Date;
@@ -39,6 +40,7 @@ const ChatMessageSchema = new Schema<IChatMessage>(
       default: "",
     },
     imageUrl: String,
+    clientMessageId: { type: String, maxlength: 24 },
     isRead: {
       type: Boolean,
       default: false,
@@ -48,5 +50,9 @@ const ChatMessageSchema = new Schema<IChatMessage>(
 );
 
 ChatMessageSchema.index({ bookingId: 1, createdAt: 1 });
+ChatMessageSchema.index({ bookingId: 1, senderId: 1, clientMessageId: 1 }, {
+  unique: true,
+  partialFilterExpression: { clientMessageId: { $exists: true } },
+});
 
 export default mongoose.model<IChatMessage>("ChatMessage", ChatMessageSchema);

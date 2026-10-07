@@ -1,5 +1,4 @@
 import { Request, Response } from "express";
-import { stampVehicleOnBooking } from "../../services/vehicle-lifecycle.service";
 import Booking from "../../models/booking.model";
 import User from "../../models/Users";
 import Driver from "../../models/driver.model";
@@ -404,176 +403,32 @@ export const getActionCenter = async (_req: Request, res: Response) => {
  */
 export const assignDriver = async (req: Request, res: Response) => {
   const { id } = req.params;
-  const { driverId } = req.body;
-
   const booking = await Booking.findById(id);
-  const driver = await Driver.findById(driverId);
-
-  if (!booking) {
-    return res.status(404).json({
-      success: false,
-      message: "Booking not found",
-    });
+  if (!booking) return res.status(404).json({ success: false, message: "Booking not found" });
+  if (booking.status !== "SEARCHING" || booking.driverId) {
+    return res.status(400).json({ success: false, message: "Booking is not searching for a driver" });
   }
-
-  if (!driver) {
-    return res.status(404).json({
-      success: false,
-      message: "Driver not found",
-    });
+  // The legacy route stays compatible. A supplied driverId cannot bypass
+  // vehicle eligibility, distance ordering or driver acceptance.
+  await bookingDispatchService.offerNext(String(booking._id));
+  const current = await bookingDispatchService.getBookingOfferDriverIds(String(booking._id));
+  if (!current.length) {
+    return res.status(400).json({ success: false, message: "No available matching driver found nearby" });
   }
-
-  if (booking.status !== "SEARCHING") {
-    return res.status(400).json({
-      success: false,
-      message: "Booking is not in searching status",
-    });
-  }
-
-  if ((driver as any).isActive === false) {
-    return res.status(400).json({
-      success: false,
-      message: "Driver is deactivated and cannot be assigned",
-    });
-  }
-
-  if (!driver.isOnline) {
-    return res.status(400).json({
-      success: false,
-      message: "Driver is offline and cannot be assigned",
-    });
-  }
-
-  // Reassigning a busy driver used to overwrite driver.currentBookingId below,
-  // orphaning the earlier trip's BUSY flag — the driver was then freed by
-  // whichever trip completed first, while the other stayed stuck. Check the
-  // bookings themselves rather than currentBookingId, which can be stale.
-  const activeBooking = await Booking.findOne({
-    driverId: driver._id,
-    _id: { $ne: booking._id },
-    status: { $in: ["ASSIGNED", "DRIVER_ARRIVED", "PICKED", "IN_PROGRESS"] },
-  }).select("bookingNumber");
-  if (activeBooking) {
-    return res.status(400).json({
-      success: false,
-      message: `Driver is already on booking ${activeBooking.bookingNumber || activeBooking._id}`,
-    });
-  }
-
-  booking.driverId = new Types.ObjectId(driverId);
-  booking.status = "ASSIGNED";
-  booking.assignedAt = new Date();
-  await booking.save();
-  try {
-    await stampVehicleOnBooking(booking._id as any, driverId);
-  } catch (e) {
-    console.error("[admin-assign] vehicle stamp failed (non-fatal)", e);
-  }
-
-  // Update driver status
-  driver.currentBookingId = booking._id as Types.ObjectId;
-  await driver.save();
-
-  // Propagate assignment to user & driver apps
-  try {
-    const userIdStr = String(booking.userId);
-    const driverIdStr = String(driver._id);
-    const bookingIdStr = String(booking._id);
-
-    emitBookingUpdate(bookingIdStr, userIdStr, driverIdStr, "ASSIGNED", {
-      driverId: driverIdStr,
-      driverName: driver.fullName,
-      driverPhone: driver.mobileNumber,
-      vehicleNumber: (driver as any).vehicleNumber,
-      rating: driver.rating,
-      assignedBy: "ADMIN",
-    });
-
-    // Notify user: driver accepted (from admin assignment)
-    emitToUser(userIdStr, "booking:accepted", {
-      bookingId: bookingIdStr,
-      driverId: driverIdStr,
-      driverName: driver.fullName,
-      driverPhone: driver.mobileNumber,
-      assignedBy: "ADMIN",
-    });
-
-    // Notify driver: new booking assigned
-    emitToUser(driverIdStr, "booking:assigned", {
-      bookingId: bookingIdStr,
-      pickup: booking.pickup,
-      drop: booking.drop,
-      estimatedFare: (booking as any).estimatedFare ?? booking.finalFare,
-      distance: (booking as any).distance,
-      assignedBy: "ADMIN",
-    });
-
-    // MQTT request to driver app
-    await mqttUtil
-      .sendBookingRequestToDriver(driverIdStr, {
-        bookingId: bookingIdStr,
-        pickup: {
-          address: booking.pickup?.address ?? "",
-          lat: booking.pickup?.lat ?? 0,
-          lng: booking.pickup?.lng ?? 0,
-        },
-        drop: {
-          address: booking.drop?.address ?? "",
-          lat: booking.drop?.lat ?? 0,
-          lng: booking.drop?.lng ?? 0,
-        },
-        distance: Number((booking as any).distance ?? 0),
-        estimatedFare: Number(
-          (booking as any).estimatedFare ?? booking.finalFare ?? 0,
-        ),
-        vehicleType: String(booking.vehicleTypeId ?? ""),
-        expiresAt: Date.now() + 5 * 60 * 1000,
-      })
-      .catch(() => false);
-
-    // Push notifications
-    await notificationService
-      .sendBookingStatusNotification(
-        new Types.ObjectId(userIdStr),
-        booking._id as Types.ObjectId,
-        "ASSIGNED",
-        driver.fullName,
-      )
-      .catch(() => null);
-
-    await notificationService
-      .sendToDriver(
-        new Types.ObjectId(driverIdStr),
-        "BOOKING",
-        "New Booking Assigned",
-        "You have been assigned a new booking by the admin team.",
-        { bookingId: bookingIdStr },
-        booking._id as Types.ObjectId,
-        "Booking",
-      )
-      .catch(() => null);
-  } catch (err) {
-    console.error("Admin assign: propagation error", err);
-  }
-
   res.locals.data = {
-    message: "Driver assigned successfully",
-    booking,
+    message: "Offered to the nearest eligible driver. Awaiting driver acceptance.",
+    booking, offeredDriverId: current[0], awaitingResponse: true,
   };
 };
 
-/**
- * Assign one booking to a specific driver + notify both apps.
- * Shared by manual assign and auto-assign. Assumes the booking is SEARCHING
- * and the driver is valid/available (caller checks).
- */
+/** Offer searching orders through the same nearest-driver queue as the apps. */
 export const autoAssignBookings = async (req: Request, res: Response) => {
   const { bookingId } = req.body || {};
   // Shared sweep — the job scheduler runs the SAME code on a timer, so the
   // button and the unattended run can never drift apart.
   const result = await runAutoAssignSweep(bookingId);
   res.locals.data = {
-    message: `Auto-assigned ${result.assigned} of ${result.evaluated} searching booking(s)`,
+    message: `Offered ${result.offered} searching booking(s); ${result.awaitingResponse} already awaiting a driver response`,
     ...result,
   };
 };
