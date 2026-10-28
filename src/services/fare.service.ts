@@ -8,7 +8,22 @@ import type { ITaxBreakdown } from "../models/tax-breakdown.schema";
 export interface FareBreakdown {
   baseFare: number;
   distanceCharge: number;
+  /**
+   * Always 0 on new quotes: the trip fare is Base + KM (client rule,
+   * 2026-10-26). Kept so bookings priced before the change still itemise.
+   */
   timeCharge: number;
+  /**
+   * The inputs behind distanceCharge, so a screen can print the line as
+   * "chargeableKm × perKmRate" and the customer can check it. The base fare
+   * covers the first `includedKm`; only the rest is billed per km.
+   */
+  perKmRate: number;
+  includedKm: number;
+  chargeableKm: number;
+  /** Top-up added when the trip came in under the rate card's minimum fare. */
+  minimumFare: number;
+  minimumFareAdjustment: number;
   surgeCharge: number;
   surgeMultiplier: number;
   addonCharges: number;
@@ -107,8 +122,10 @@ const hourInWindow = (hour: number, w: SurgeWindow): boolean =>
 
 /**
  * The peak and night windows in force. Multi-row windows replaced the single
- * start/end/multiplier trio; a config that predates the arrays is read
- * through its legacy fields so nothing changes until the admin edits it.
+ * start/end/multiplier trio; a config whose list is empty is read through its
+ * legacy fields. The admin page receives these effective rows as its lists
+ * (getFareConfig) and saving them retires the legacy multiplier
+ * (updateFareConfig), so nothing applies that the admin cannot see.
  */
 export const surgeWindowsFor = (
   fareConfig: any,
@@ -241,15 +258,19 @@ export const calculateFare = async (
   // Calculate base fare
   const baseFare = rates.baseFare;
 
-  // Calculate distance charge
-  const chargeableDistance = Math.max(
-    0,
-    input.distanceKm - vehicleType.minDistanceKm,
-  );
+  // Calculate distance charge. The base fare covers the first
+  // minDistanceKm; the rest is billed per km.
+  const includedKm = Math.max(0, Number(vehicleType.minDistanceKm) || 0);
+  const chargeableDistance = Math.max(0, input.distanceKm - includedKm);
   const distanceCharge = chargeableDistance * rates.perKmRate;
 
-  // Calculate time charge
-  const timeCharge = input.durationMin * rates.perMinuteRate;
+  // No time charge: the trip fare is Base + KM (client rule, 2026-10-26). It
+  // was durationMin × perMinuteRate, and with durationMin modelled at 25 km/h
+  // it was often the largest line on the bill (a 10 km 3-wheeler trip paid
+  // ₹240 for "time" against ₹135 for distance) — customers checking Base + KM
+  // read the total as wrong. perMinuteRate now prices only waiting beyond the
+  // free minutes (calculateWaitingCharges).
+  const timeCharge = 0;
 
   // Get surge multiplier
   const surge = surgeAt(fareConfig, input.scheduledTime, input.city);
@@ -309,8 +330,11 @@ export const calculateFare = async (
     loadingUnloadingCharge +
     tollCharges;
 
-  // Apply minimum fare
+  // Apply minimum fare — reported as its own line, or the itemised rows
+  // would not add up to the subtotal.
+  let minimumFareAdjustment = 0;
   if (subtotal < minimumFare) {
+    minimumFareAdjustment = minimumFare - subtotal;
     subtotal = minimumFare;
   }
 
@@ -344,6 +368,11 @@ export const calculateFare = async (
     baseFare: Math.round(baseFare * 100) / 100,
     distanceCharge: Math.round(distanceCharge * 100) / 100,
     timeCharge: Math.round(timeCharge * 100) / 100,
+    perKmRate: rates.perKmRate,
+    includedKm,
+    chargeableKm: Math.round(chargeableDistance * 100) / 100,
+    minimumFare,
+    minimumFareAdjustment: Math.round(minimumFareAdjustment * 100) / 100,
     surgeCharge: Math.round(surgeCharge * 100) / 100,
     surgeMultiplier,
     surgeLabel: surge.label,
@@ -362,7 +391,11 @@ export const calculateFare = async (
     // Same source of truth calculateWaitingCharges bills from, so what the
     // customer is quoted is exactly what they'll be charged.
     freeWaitingMinutes: rates.freeWaitingMinutes,
-    waitingChargePerMin: fareConfig?.waitingChargePerMin ?? 2,
+    // The rate calculateWaitingCharges actually bills: the vehicle's
+    // per-minute rate, the global figure only when it has none. This quoted
+    // the global ₹2/min while a 3-wheeler was billed ₹10/min.
+    waitingChargePerMin:
+      rates.perMinuteRate > 0 ? rates.perMinuteRate : (fareConfig?.waitingChargePerMin ?? 2),
     rateSource: rates.rateSource,
     rateCity: rates.rateCity,
     taxBreakdown,

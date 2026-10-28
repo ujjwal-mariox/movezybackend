@@ -13,6 +13,11 @@ import * as DriverVehicleService from "../services/driver-vehicle.service";
 import * as SmsService from "../services/sms.service";
 import VehicleModel from "../models/vehicle.model";
 import * as VehicleLifecycle from "../services/vehicle-lifecycle.service";
+import {
+  recomputeDriverLicenceBlock,
+  validateDocumentDate,
+  validateVehicleDocumentDates,
+} from "../services/document-expiry.service";
 import VehicleType from "../models/vehicle-type.model";
 import DriverVehicleModel from "../models/driver-vehicle.model";
 import helpers from "../utils/helpers";
@@ -399,7 +404,7 @@ export const uploadDrivingLicense = async (
 ) => {
   try {
     const driverId = (req as any).driverId;
-    const { licenseNumber, expiryDate } = req.body;
+    const { licenseNumber } = req.body;
 
     const files = req.files as {
       frontImage?: Express.Multer.File[];
@@ -411,6 +416,16 @@ export const uploadDrivingLicense = async (
       req.msg = "license_images_required";
       return next();
     }
+
+    // Mandatory, and not already past (document-expiry.service). Stored as
+    // YYYY-MM-DD, the shape DriverKyc keeps and the admin edits.
+    const expiry = validateDocumentDate(req.body.expiryDate, "Driving licence");
+    if (!expiry.ok) {
+      req.rCode = 0;
+      req.msg = expiry.msg;
+      return next();
+    }
+    const expiryDate = expiry.date.toISOString().slice(0, 10);
 
     const [frontUpload, backUpload] = await Promise.all([
       fileUploadService.uploadMultipleFilesToAws(files.frontImage),
@@ -455,6 +470,7 @@ export const uploadDrivingLicense = async (
 
     // Update driver status to vehicle_added
     await DriverService.updateDriverStatus(driverId, "vehicle_added");
+    await recomputeDriverLicenceBlock(driverId);
 
     req.rData = { kyc, vehicle };
     req.msg = "driving_license_uploaded";
@@ -666,6 +682,26 @@ export const uploadRC = async (
       return next();
     }
 
+    // Document dates are mandatory (document-expiry.service). Checked before
+    // anything is uploaded. On an edit, a date the request leaves out keeps
+    // its stored value, but the result must still be complete and current.
+    const sent = (key: string) => Object.prototype.hasOwnProperty.call(req.body, key);
+    const datesCheck = validateVehicleDocumentDates(
+      {
+        rcExpiryDate: sent("rcExpiryDate") ? req.body.rcExpiryDate : existing?.rcExpiryDate,
+        insuranceExpiryDate: sent("insuranceExpiryDate")
+          ? req.body.insuranceExpiryDate
+          : existing?.insuranceExpiryDate,
+        pucExpiryDate: sent("pucExpiryDate") ? req.body.pucExpiryDate : existing?.pucExpiryDate,
+      },
+      VehicleLifecycle.normalizeFuelType(req.body.fuelType) || existing?.fuelType,
+    );
+    if (!datesCheck.ok) {
+      req.rCode = 0;
+      req.msg = datesCheck.msg;
+      return next();
+    }
+
     // Upload RC images to AWS in parallel
     const uploads = await Promise.all([
       rcFrontFile ? fileUploadService.uploadFileToAws([rcFrontFile]) : Promise.resolve(null),
@@ -722,16 +758,7 @@ export const uploadRC = async (
       return next();
     }
 
-    const parseDate = (v: unknown): Date | undefined => {
-      if (v === undefined || v === null || v === "") return undefined;
-      const d = new Date(String(v));
-      return Number.isNaN(d.getTime()) ? undefined : d;
-    };
-    const expiry = {
-      rcExpiryDate: parseDate(req.body.rcExpiryDate),
-      insuranceExpiryDate: parseDate(req.body.insuranceExpiryDate),
-      pucExpiryDate: parseDate(req.body.pucExpiryDate),
-    };
+    const expiry = datesCheck.dates;
 
     let vehicle: any;
     if (existing) {
@@ -742,9 +769,7 @@ export const uploadRC = async (
         ...(fuelType ? { fuelType } : {}),
         ...(req.body.city ? { city: req.body.city } : {}),
         ...(catalogType ? { vehicleTypeId: catalogType._id } : {}),
-        ...Object.fromEntries(Object.entries(expiry)
-          .filter(([key]) => Object.prototype.hasOwnProperty.call(req.body, key))
-          .map(([key, value]) => [key, value ?? null])),
+        ...expiry,
       });
       if (!result.ok) { req.rCode = 0; req.msg = result.msg; return next(); }
       vehicle = result.vehicle;

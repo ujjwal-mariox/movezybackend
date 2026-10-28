@@ -40,6 +40,17 @@ driverRouter.put(
   ResponseMiddleware,
 );
 
+// Renew the driving licence (new photo + expiry date)
+driverRouter.put(
+  "/licence",
+  upload.fields([
+    { name: "frontImage", maxCount: 1 },
+    { name: "backImage", maxCount: 1 },
+  ]),
+  ErrorHandlerMiddleware(DriverController.renewDrivingLicence),
+  ResponseMiddleware,
+);
+
 // Update profile photo
 driverRouter.put(
   "/profile/photo",
@@ -301,6 +312,14 @@ driverRouter.post(
 driverRouter.post(
   "/my-vehicles/:vehicleId/apply-coupon",
   ErrorHandlerMiddleware(DriverController.applyVehicleCoupon),
+  ResponseMiddleware,
+);
+
+// Renew a vehicle's RC / insurance / PUC dates (no re-approval)
+driverRouter.put(
+  "/my-vehicles/:vehicleId/documents",
+  upload.any(),
+  ErrorHandlerMiddleware(DriverController.updateMyVehicleDocuments),
   ResponseMiddleware,
 );
 

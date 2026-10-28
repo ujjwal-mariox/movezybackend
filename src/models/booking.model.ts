@@ -119,6 +119,11 @@ const BookingSchema = new Schema<IBooking>(
     timeCharge: { type: Number, default: 0 },
     surgeFare: { type: Number, default: 0 },
     surgeMultiplier: { type: Number, default: 1 },
+    // What distanceCharge was priced from, so every bill can print it as
+    // "(distanceKm − includedKm) × perKmRate". Absent on older bookings.
+    perKmRate: Number,
+    includedKm: Number,
+    minimumFareAdjustment: { type: Number, default: 0 },
 
     // Add-on services (Loading/Unloading)
     addons: [BookingAddonSchema],

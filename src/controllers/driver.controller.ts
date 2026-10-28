@@ -37,6 +37,13 @@ import { cache } from "../utils/redis.util";
 import Payout from "../models/payout.model";
 import * as DriverPayoutService from "../services/driver-payout.service";
 import * as VehicleLifecycle from "../services/vehicle-lifecycle.service";
+import {
+  invalidateExpirySummary,
+  recomputeDriverLicenceBlock,
+  recomputeVehicleExpiryBlock,
+  validateDocumentDate,
+  validateVehicleDocumentDates,
+} from "../services/document-expiry.service";
 import { presentPhone } from "../services/call-masking.service";
 import { computeBookingTax } from "../services/tax.service";
 
@@ -1254,7 +1261,7 @@ export const getBookingHistory = async (
       // Never ship OTPs to the driver — history includes the ACTIVE booking.
       .select("-otp -deliveryOtp")
       .populate("userId", "fullName")
-      .populate("vehicleTypeId", "name")
+      .populate("vehicleTypeId", "name icon image")
       .sort({ createdAt: -1 })
       .skip((Number(page) - 1) * Number(limit))
       .limit(Number(limit))
@@ -2257,11 +2264,13 @@ export const addMyVehicle = async (
       req.msg = attrError;
       return next();
     }
-    const parseDate = (v: unknown): Date | undefined => {
-      if (v === undefined || v === null || v === "") return undefined;
-      const d = new Date(String(v));
-      return Number.isNaN(d.getTime()) ? undefined : d;
-    };
+    // Mandatory document dates — same rule as /kyc/rc.
+    const datesCheck = validateVehicleDocumentDates(req.body, normalizedFuel);
+    if (!datesCheck.ok) {
+      req.rCode = 0;
+      req.msg = datesCheck.msg;
+      return next();
+    }
 
     // Handle file uploads
     let rcImageUrl = "";
@@ -2295,9 +2304,7 @@ export const addMyVehicle = async (
       vehicleBodyType: normalizedBody,
       fuelType: normalizedFuel,
       city,
-      rcExpiryDate: parseDate(req.body.rcExpiryDate),
-      insuranceExpiryDate: parseDate(req.body.insuranceExpiryDate),
-      pucExpiryDate: parseDate(req.body.pucExpiryDate),
+      ...datesCheck.dates,
       rcFrontImage: rcImageUrl,
       vehicleImages: vehicleImageUrls,
       assignedDriverName,
@@ -2311,6 +2318,149 @@ export const addMyVehicle = async (
 
     req.rData = vehicle;
     req.msg = "vehicle_added";
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * PUT /driver/app/my-vehicles/:vehicleId/documents
+ * The partner renews a vehicle's RC / insurance / PUC dates. Unlike Edit
+ * Vehicle this does not send the vehicle back for re-approval: the new dates
+ * apply at once (lifting an expiry block when they are current), the admin
+ * sees them on the Compliance page, and a new RC photo, when attached,
+ * replaces the one on file. Same date rule as registration.
+ */
+export const updateMyVehicleDocuments = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  try {
+    const driverId = (req as any).driverId;
+    const { vehicleId } = req.params;
+    if (!Types.ObjectId.isValid(String(vehicleId))) {
+      req.rCode = 0;
+      req.msg = "vehicle_not_found";
+      return next();
+    }
+    const vehicle: any = await VehicleModel.findOne({
+      _id: vehicleId,
+      driverId: new Types.ObjectId(driverId),
+      isDeleted: { $ne: true },
+    });
+    if (!vehicle) {
+      req.rCode = 0;
+      req.msg = "vehicle_not_found";
+      return next();
+    }
+
+    const datesCheck = validateVehicleDocumentDates(req.body, vehicle.fuelType);
+    if (!datesCheck.ok) {
+      req.rCode = 0;
+      req.msg = datesCheck.msg;
+      return next();
+    }
+
+    const files = Array.isArray(req.files) ? (req.files as Express.Multer.File[]) : [];
+    const rcFront = files.find((f) => f.fieldname === "rcFrontImage");
+    const rcBack = files.find((f) => f.fieldname === "rcBackImage");
+    const [frontUpload, backUpload] = await Promise.all([
+      rcFront ? fileUploadService.uploadFileToAws([rcFront]) : Promise.resolve(null),
+      rcBack ? fileUploadService.uploadFileToAws([rcBack]) : Promise.resolve(null),
+    ]);
+
+    Object.assign(vehicle, datesCheck.dates);
+    if (frontUpload?.images) vehicle.rcFrontImage = frontUpload.images;
+    if (backUpload?.images) vehicle.rcBackImage = backUpload.images;
+    await vehicle.save();
+
+    // Lifts (or sets) the expiry block and re-derives dispatch rows; the
+    // compliance summary is dropped either way so the admin sees the new dates.
+    await recomputeVehicleExpiryBlock(vehicle._id);
+    await invalidateExpirySummary();
+
+    const fresh: any = await VehicleModel.findById(vehicle._id)
+      .select("rcExpiryDate insuranceExpiryDate pucExpiryDate dispatchBlock rcFrontImage")
+      .lean();
+    req.rData = fresh;
+    req.msg = "Document dates updated.";
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * PUT /driver/app/licence
+ * The partner renews their driving licence: a photo of the renewed licence
+ * plus the new expiry date, both required. The date applies at once (lifting
+ * a licence-expiry block), and the licence goes back to PENDING review so the
+ * admin re-checks the photo — the profile shows "Under review" until then.
+ * Separate from /kyc/driving-license, which is the onboarding step and moves
+ * the partner's onboarding status.
+ */
+export const renewDrivingLicence = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  try {
+    const driverId = (req as any).driverId;
+    const expiry = validateDocumentDate(req.body.expiryDate, "Driving licence");
+    if (!expiry.ok) {
+      req.rCode = 0;
+      req.msg = expiry.msg;
+      return next();
+    }
+    const files = req.files as {
+      frontImage?: Express.Multer.File[];
+      backImage?: Express.Multer.File[];
+    };
+    if (!files?.frontImage?.length) {
+      req.rCode = 0;
+      req.msg = "Add a photo of your renewed driving licence.";
+      return next();
+    }
+
+    const kyc: any = await DriverKycModel.findOne({ driverId: new Types.ObjectId(driverId) });
+    if (!kyc?.drivingLicense?.frontImage) {
+      req.rCode = 0;
+      req.msg = "No driving licence on file yet. Finish onboarding first.";
+      return next();
+    }
+
+    const [frontUpload, backUpload] = await Promise.all([
+      fileUploadService.uploadFileToAws([files.frontImage[0]]),
+      files.backImage?.length
+        ? fileUploadService.uploadFileToAws([files.backImage[0]])
+        : Promise.resolve(null),
+    ]);
+    if (!frontUpload?.images) throw new Error("Driving licence upload failed");
+
+    const expiryDate = expiry.date.toISOString().slice(0, 10);
+    kyc.drivingLicense.frontImage = frontUpload.images;
+    // Onboarding stores the one photo as both sides; keep that when only the
+    // front is sent, so the admin never sees the old back next to a new front.
+    kyc.drivingLicense.backImage = backUpload?.images || frontUpload.images;
+    kyc.drivingLicense.expiryDate = expiryDate;
+    kyc.documentStatus = kyc.documentStatus || {};
+    kyc.documentStatus.drivingLicense = { status: "PENDING" };
+    kyc.isVerified = false;
+    kyc.markModified("documentStatus");
+    await kyc.save();
+
+    await recomputeDriverLicenceBlock(driverId);
+    await invalidateExpirySummary();
+
+    const driver: any = await DriverModel.findById(driverId).select("documentBlock").lean();
+    req.rData = {
+      expiryDate,
+      reviewStatus: "PENDING",
+      documentBlock: driver?.documentBlock || null,
+    };
+    req.msg = "Licence updated. It shows as under review until our team re-checks it.";
     next();
   } catch (error) {
     next(error);
@@ -2736,7 +2886,8 @@ function mapDashboardBooking(booking: any, commissionPercent = 20) {
     addonTotal: Number(booking?.addonTotal || 0),
     customerName: booking?.userId?.fullName || "",
     vehicleTypeName: booking?.vehicleTypeId?.name || "",
-    vehicleTypeIcon: booking?.vehicleTypeId?.icon || "",
+    // `icon` is empty on every catalogue type; the artwork is `image`.
+    vehicleTypeIcon: booking?.vehicleTypeId?.icon || booking?.vehicleTypeId?.image || "",
     paymentMethod: booking?.paymentMethod || "CASH",
     goodsType: booking?.goodsType || "",
     goodsDescription: booking?.goodsDescription || "",

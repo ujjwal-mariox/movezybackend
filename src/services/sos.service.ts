@@ -178,20 +178,12 @@ export const triggerSOS = async (
     });
   }
 
-  // Notify the other party (if user triggers, notify driver and vice versa)
+  // A driver's SOS also tells the customer help is on the way. A customer's
+  // SOS deliberately does NOT notify the driver (decision 2026-10-26): if the
+  // driver is the threat, that alert would warn them. It reaches the safety
+  // team through the admin SOS dashboard above.
   if (booking) {
-    if (triggeredBy === "USER" && booking.driverId) {
-      await NotificationService.sendToDriver(
-        booking.driverId,
-        "SYSTEM",
-        "🚨 SOS Alert",
-        "User has triggered an emergency alert. Please check on the customer.",
-        {
-          sosId: sosAlert._id.toString(),
-          bookingId: bookingId?.toString() || "",
-        },
-      );
-    } else if (triggeredBy === "DRIVER" && booking.userId) {
+    if (triggeredBy === "DRIVER" && booking.userId) {
       await NotificationService.sendToUser(
         booking.userId,
         "SYSTEM",

@@ -708,6 +708,9 @@ export const createBooking = async (req: Request, res: Response) => {
       timeCharge: fareBreakdown.timeCharge || 0,
       surgeFare: fareBreakdown.surgeCharge || 0,
       surgeMultiplier: fareBreakdown.surgeMultiplier || 1,
+      perKmRate: fareBreakdown.perKmRate,
+      includedKm: fareBreakdown.includedKm,
+      minimumFareAdjustment: fareBreakdown.minimumFareAdjustment || 0,
       addons: resolvedAddons.map((addon: any) => ({
         addonId: addon.addonId,
         name: addon.name,
@@ -1260,6 +1263,9 @@ export const addStop = async (req: Request, res: Response) => {
     booking.timeCharge = fareBreakdown.timeCharge || 0;
     booking.surgeFare = fareBreakdown.surgeCharge || 0;
     booking.surgeMultiplier = fareBreakdown.surgeMultiplier || 1;
+    booking.perKmRate = fareBreakdown.perKmRate;
+    booking.includedKm = fareBreakdown.includedKm;
+    booking.minimumFareAdjustment = fareBreakdown.minimumFareAdjustment || 0;
     booking.addonTotal = addonTotal;
     booking.gstAmount = fareBreakdown.gstAmount || 0;
     booking.gstPercentage = fareBreakdown.gstPercentage ?? booking.gstPercentage ?? 0;

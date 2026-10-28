@@ -14,9 +14,13 @@ import { syncDriverDispatchRows } from "./vehicle-lifecycle.service";
  *   Vehicle: RC, insurance and PUC expiry (Vehicle.rcExpiryDate / …)
  *
  * WHERE THE DATES COME FROM
- *   Captured when the partner registers the vehicle (optional at that point so
- *   onboarding is never blocked on paperwork they don't have to hand) and
- *   editable by the admin from the driver's vehicle panel.
+ *   Mandatory since 2026-10-26 (client rule: no expiring document without its
+ *   date). Captured when the partner submits the licence / registers a
+ *   vehicle, renewable by the partner from the app (licence: Profile; vehicle:
+ *   My Vehicles → Update documents), and editable by the admin from the
+ *   driver's vehicle panel. PUC is not asked for electric vehicles — they are
+ *   exempt. validateDocumentDate / validateVehicleDocumentDates below are the
+ *   one rule every submission path uses.
  *
  * THE DAILY JOB (runDocumentExpiryJob, via job-scheduler)
  *   1. Reminders at 30 / 15 / 7 days before expiry, to the driver (push +
@@ -67,6 +71,58 @@ export const daysUntil = (date: Date | string | null | undefined): number | null
   const target = new Date(d);
   target.setHours(0, 0, 0, 0);
   return Math.round((target.getTime() - startOfToday().getTime()) / 86_400_000);
+};
+
+// ── Submission rules ───────────────────────────────────────────────────────
+
+/** Electric vehicles are exempt from PUC, so it is neither asked nor tracked. */
+export const isPucExempt = (fuelType?: string | null): boolean =>
+  String(fuelType || "").trim().toLowerCase() === "electric";
+
+type DateCheck = { ok: true; date: Date } | { ok: false; msg: string };
+
+/**
+ * A partner-submitted expiry date: required, a real date, and not already
+ * past — an expired document can't be registered, only renewed.
+ */
+export const validateDocumentDate = (value: unknown, label: string): DateCheck => {
+  if (value === undefined || value === null || String(value).trim() === "") {
+    return { ok: false, msg: `${label} expiry date is required.` };
+  }
+  const date = new Date(String(value));
+  if (Number.isNaN(date.getTime())) {
+    return { ok: false, msg: `${label} expiry date is not a valid date.` };
+  }
+  if ((daysUntil(date) ?? -1) < 0) {
+    return {
+      ok: false,
+      msg: `${label} has already expired. Renew it and enter the new expiry date.`,
+    };
+  }
+  return { ok: true, date };
+};
+
+/**
+ * The three vehicle dates. RC and insurance are always required, PUC unless
+ * the vehicle is electric (then it is undefined, which unsets any stored
+ * value on save, so an EV never gets PUC reminders or a PUC block).
+ */
+export const validateVehicleDocumentDates = (
+  input: { rcExpiryDate?: unknown; insuranceExpiryDate?: unknown; pucExpiryDate?: unknown },
+  fuelType?: string | null,
+):
+  | { ok: true; dates: { rcExpiryDate: Date; insuranceExpiryDate: Date; pucExpiryDate: Date | undefined } }
+  | { ok: false; msg: string } => {
+  const rc = validateDocumentDate(input.rcExpiryDate, "RC");
+  if (!rc.ok) return rc;
+  const insurance = validateDocumentDate(input.insuranceExpiryDate, "Insurance");
+  if (!insurance.ok) return insurance;
+  if (isPucExempt(fuelType)) {
+    return { ok: true, dates: { rcExpiryDate: rc.date, insuranceExpiryDate: insurance.date, pucExpiryDate: undefined } };
+  }
+  const puc = validateDocumentDate(input.pucExpiryDate, "PUC");
+  if (!puc.ok) return puc;
+  return { ok: true, dates: { rcExpiryDate: rc.date, insuranceExpiryDate: insurance.date, pucExpiryDate: puc.date } };
 };
 
 const vehicleDocs = (v: any): { key: string; date: Date | null }[] => [

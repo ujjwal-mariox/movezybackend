@@ -1,3 +1,5 @@
+// Must stay first: puts the process clock on IST before anything handles a date.
+import "./utils/timezone";
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import compression from "compression";

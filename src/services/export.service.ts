@@ -1,4 +1,5 @@
 import ExcelJS from "exceljs";
+import { asIstWallClock, formatIstDateTime } from "../utils/timezone";
 import PDFDocument from "pdfkit";
 import mongoose, { Types } from "mongoose";
 
@@ -590,7 +591,8 @@ export const DATASETS: Record<string, ExportDataset> = Object.fromEntries(
 
 const cellValue = (col: ExportColumn, v: any): any => {
   if (v === null || v === undefined || v === "") return "";
-  if (col.type === "date") return v instanceof Date ? v : new Date(v);
+  // exceljs writes every Date as UTC; shift so the sheet shows IST.
+  if (col.type === "date") return asIstWallClock(v instanceof Date ? v : new Date(v));
   if (col.type === "money" || col.type === "number") return typeof v === "number" ? v : Number(v);
   return String(v);
 };
@@ -634,7 +636,7 @@ const fmtCell = (col: ExportColumn, v: any): string => {
   if (v === null || v === undefined || v === "") return "";
   if (col.type === "date") {
     const d = v instanceof Date ? v : new Date(v);
-    return Number.isNaN(d.getTime()) ? String(v) : d.toISOString().replace("T", " ").slice(0, 16);
+    return Number.isNaN(d.getTime()) ? String(v) : formatIstDateTime(d);
   }
   if (col.type === "money") return Number(v).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   return String(v);
@@ -661,7 +663,7 @@ export const renderPdf = async (
     const header = () => {
       doc.font("Helvetica-Bold").fontSize(13).fillColor("#111").text(`Movezy — ${dataset.title}`, 28, 24);
       doc.font("Helvetica").fontSize(8).fillColor("#666").text(
-        `Generated ${new Date().toISOString().replace("T", " ").slice(0, 16)} UTC · ` +
+        `Generated ${formatIstDateTime(new Date())} IST · ` +
           `${range.from ? range.from.toISOString().slice(0, 10) : "all time"} → ${range.to ? range.to.toISOString().slice(0, 10) : "now"} · ${rows.length} rows`,
         28, 42,
       );

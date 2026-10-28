@@ -126,8 +126,13 @@ export const getFareConfig = async (req: Request, res: Response) => {
 
   // The windows the fare engine will actually use (legacy single-window
   // configs are read through the same helper), so the page can show them.
+  // They are also returned AS the config's rows: a legacy peak/night
+  // multiplier used to apply while the editor showed an empty list, so the
+  // client saw surge on quotes with "nothing configured". Shown as rows, it
+  // can be seen, edited and deleted like any other window.
+  const effective = FareService.surgeWindowsFor(config);
   res.locals.data = {
-    config,
+    config: { ...config.toObject(), peakWindows: effective.peak, nightWindows: effective.night },
     surge: {
       ...FareService.surgeWindowsFor(config),
       // Weather surges live right now (any city).
@@ -184,8 +189,17 @@ export const updateFareConfig = async (req: Request, res: Response) => {
   const updateData = { ...req.body };
   const peak = cleanSurgeWindows(updateData.peakWindows);
   const night = cleanSurgeWindows(updateData.nightWindows);
-  if (peak !== undefined) updateData.peakWindows = peak;
-  if (night !== undefined) updateData.nightWindows = night;
+  // Once the admin saves a list, that list is the whole truth: the legacy
+  // single-window multiplier is retired (1 = off), or deleting the last row
+  // would quietly bring the hidden legacy surge back.
+  if (peak !== undefined) {
+    updateData.peakWindows = peak;
+    updateData.peakHourSurgeMultiplier = 1;
+  }
+  if (night !== undefined) {
+    updateData.nightWindows = night;
+    updateData.nightSurgeMultiplier = 1;
+  }
   const weather = cleanWeatherSurges(updateData.weatherSurges);
   if (weather !== undefined) updateData.weatherSurges = weather;
 

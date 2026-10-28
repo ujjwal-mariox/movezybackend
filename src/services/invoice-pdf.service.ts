@@ -1,4 +1,5 @@
 import PDFDocument from "pdfkit";
+import { APP_TIMEZONE } from "../utils/timezone";
 import fs from "fs";
 import path from "path";
 import { IInvoice } from "../models/invoice.model";
@@ -29,7 +30,9 @@ const formatDate = (d?: Date): string => {
   if (!d) return "-";
   const dt = new Date(d);
   if (Number.isNaN(dt.getTime())) return "-";
+  // Explicit zone: printed on a UTC host this read 05:36 for an 11:06 trip.
   return dt.toLocaleString("en-IN", {
+    timeZone: APP_TIMEZONE,
     day: "2-digit",
     month: "short",
     year: "numeric",
@@ -195,9 +198,23 @@ export const renderInvoicePdf = async ({
   doc.font("Helvetica-Bold").fontSize(11).fillColor(INK).text("Charges");
   doc.moveDown(0.5);
 
+  // Spell the distance line out as km × rate when the booking recorded it,
+  // so the reader can check it against the base fare + per-km card.
+  const inv: any = invoice;
+  const priced = Number(inv.perKmRate) > 0 && Number(inv.distanceKm) > 0;
+  const includedKm = Number(inv.includedKm) || 0;
+  const chargeableKm = Math.max(0, Number(inv.distanceKm) - includedKm);
   const charges: [string, number][] = [
-    ["Base fare", invoice.baseFare],
-    ["Distance charge", invoice.distanceCharge],
+    [
+      priced && includedKm > 0 ? `Base fare (incl. first ${includedKm} km)` : "Base fare",
+      invoice.baseFare,
+    ],
+    [
+      priced
+        ? `Distance charge (${chargeableKm.toFixed(2)} km x Rs. ${Number(inv.perKmRate)}/km)`
+        : "Distance charge",
+      invoice.distanceCharge,
+    ],
     ["Time charge", invoice.timeCharge],
     ["Surge charge", invoice.surgeCharge],
     ["Add-ons", invoice.addonCharges],
@@ -205,6 +222,7 @@ export const renderInvoicePdf = async ({
     ["Loading / unloading", invoice.loadingUnloadingCharge],
     ["Waiting charge", invoice.waitingCharge],
     ["Toll charges", invoice.tollCharges],
+    ["Minimum fare adjustment", inv.minimumFareAdjustment || 0],
   ];
   charges
     .filter(([, amount]) => Number(amount) > 0)

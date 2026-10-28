@@ -10,6 +10,51 @@ import { FareConfig } from "../models/app-config.model";
  */
 let cachedDeliveryCount: { value: number; at: number } | null = null;
 
+const CATEGORY_LABELS: Record<string, string> = {
+  "2W": "2 Wheeler",
+  "3W": "3 Wheeler",
+  "4W": "4 Wheeler",
+  HV: "Heavy Vehicle",
+};
+
+/**
+ * One home card per category when a category shows more than one of its
+ * vehicle types (sub-categories): 2 Wheeler → Scooter and Bike appear as a
+ * single "2 Wheeler" card (client decision 2026-10-26). The card carries the
+ * category's default sub-type — its id preselects it, its picture and size
+ * are shown — and "Starting ₹" from the cheapest sub-type; the vehicle list
+ * after the locations then offers every sub-type at its own price. A
+ * category with a single home-visible type keeps that type's own card.
+ */
+const collapseCategories = (types: any[]): any[] => {
+  const byCategory = new Map<string, any[]>();
+  for (const t of types) {
+    if (!t.categoryCode) continue;
+    byCategory.set(t.categoryCode, [...(byCategory.get(t.categoryCode) || []), t]);
+  }
+  const out: any[] = [];
+  const done = new Set<string>();
+  for (const t of types) {
+    const group = t.categoryCode ? byCategory.get(t.categoryCode)! : [t];
+    if (group.length < 2) {
+      out.push(t);
+      continue;
+    }
+    if (done.has(t.categoryCode)) continue;
+    done.add(t.categoryCode);
+    const lead = group.find((g) => g.isDefaultForCategory) || group[0];
+    out.push({
+      ...lead,
+      name: CATEGORY_LABELS[t.categoryCode] || lead.name,
+      baseFare: Math.min(...group.map((g) => Number(g.baseFare) || 0)),
+      maxWeightKg: Math.max(...group.map((g) => Number(g.maxWeightKg) || 0)),
+      isCategory: true,
+      subTypes: group.map((g) => ({ _id: g._id, name: g.name })),
+    });
+  }
+  return out;
+};
+
 export const getHomePage = async (req: Request, res: Response) => {
   // Fetch active, non-deleted vehicle types sorted by sortOrder
   const vehicleTypes = await VehicleType.find({
@@ -21,10 +66,11 @@ export const getHomePage = async (req: Request, res: Response) => {
     // render the design's "20kg, 2 Feet" subtitle and silently fell back to
     // the price — the dimensions existed on the record but never left the API.
     .select(
-      "name description maxWeightKg lengthFt breadthFt heightFt baseFare perKmRate perMinuteRate image icon sortOrder allowIntraCity allowInterCity minRangeKm maxRangeKm showOnHomeScreen"
+      "name description maxWeightKg lengthFt breadthFt heightFt baseFare perKmRate perMinuteRate image icon sortOrder allowIntraCity allowInterCity minRangeKm maxRangeKm showOnHomeScreen categoryCode isDefaultForCategory"
     )
     .sort({ sortOrder: 1, name: 1 })
-    .lean();
+    .lean()
+    .then(collapseCategories);
 
   // Fetch active, non-expired promo codes for banners
   const now = new Date();

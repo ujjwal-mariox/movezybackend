@@ -117,6 +117,10 @@ export const generateInvoice = async (
     loadingUnloadingCharge: booking.loadingUnloading?.charge || 0,
     waitingCharge: booking.waitingCharge || 0,
     tollCharges: booking.tollCharges || 0,
+    minimumFareAdjustment: (booking as any).minimumFareAdjustment || 0,
+    distanceKm: booking.distanceKm,
+    includedKm: (booking as any).includedKm,
+    perKmRate: (booking as any).perKmRate,
 
     // Discounts
     promoDiscount: booking.promoDiscount || 0,

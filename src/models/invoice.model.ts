@@ -18,6 +18,12 @@ export interface IInvoice {
   loadingUnloadingCharge: number;
   waitingCharge: number;
   tollCharges: number;
+  /** Top-up to the rate card's minimum fare, so the rows reach the subtotal. */
+  minimumFareAdjustment?: number;
+  /** What distanceCharge was priced from; absent on older invoices. */
+  distanceKm?: number;
+  includedKm?: number;
+  perKmRate?: number;
 
   // Discounts
   promoDiscount: number;
@@ -91,6 +97,10 @@ const InvoiceSchema = new Schema<IInvoice>(
     loadingUnloadingCharge: { type: Number, default: 0, min: 0 },
     waitingCharge: { type: Number, default: 0, min: 0 },
     tollCharges: { type: Number, default: 0, min: 0 },
+    minimumFareAdjustment: { type: Number, default: 0, min: 0 },
+    distanceKm: Number,
+    includedKm: Number,
+    perKmRate: Number,
 
     // Discounts
     promoDiscount: { type: Number, default: 0, min: 0 },

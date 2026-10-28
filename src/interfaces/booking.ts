@@ -105,6 +105,9 @@ export interface IBooking {
   timeCharge?: number;
   surgeFare?: number;
   surgeMultiplier?: number;
+  perKmRate?: number;
+  includedKm?: number;
+  minimumFareAdjustment?: number;
 
   // Addons
   addons?: IBookingAddon[];
