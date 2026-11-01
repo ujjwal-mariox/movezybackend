@@ -95,6 +95,10 @@ export const sendPushNotification = async (
   title: string,
   body: string,
   data?: Record<string, string>,
+  // Android channel/sound override. The apps create "movezy_channel" for
+  // everything; the driver app's booking offers use its ring channel so a
+  // push on a closed app plays the same bell as the in-app ring.
+  androidChannel?: { channelId: string; sound?: string },
 ): Promise<boolean> => {
   try {
     if (!firebaseApp) {
@@ -110,10 +114,11 @@ export const sendPushNotification = async (
       android: {
         priority: "high",
         notification: {
-          sound: "default",
-          channelId: "movezy_channel",
+          sound: androidChannel?.sound || "default",
+          channelId: androidChannel?.channelId || "movezy_channel",
+          // Single-colour status-bar icon both apps ship; tinted Movezy orange.
           icon: "ic_notification",
-          color: "#4CAF50",
+          color: "#FF6200",
         },
       },
       apns: {

@@ -575,6 +575,8 @@ export const offerNext = async (bookingId: string): Promise<string[]> => {
             "🔔 New booking request",
             `Pickup: ${payload.pickup.address.substring(0, 50)} | ₹${payload.estimatedFare}`,
             { type: "BOOKING_REQUEST", bookingId, action: "ACCEPT_BOOKING" },
+            // The driver app's ring channel (BookingRingService), bell sound.
+            { channelId: "booking_requests_v2", sound: "booking_bell" },
           );
         }
       } catch {

@@ -634,8 +634,14 @@ driverRouter.post(
   ResponseMiddleware,
 );
 
-// Update FCM token
+// Update FCM token. PUT matches the customer route (/notifications/fcm-token)
+// and is what the partner app sends; POST stays for older callers.
 driverRouter.post(
+  "/notifications/fcm-token",
+  ErrorHandlerMiddleware(DriverController.updateFcmToken),
+  ResponseMiddleware,
+);
+driverRouter.put(
   "/notifications/fcm-token",
   ErrorHandlerMiddleware(DriverController.updateFcmToken),
   ResponseMiddleware,
