@@ -247,11 +247,12 @@ const preflight = () => {
     fatal.push("CORS_ORIGIN is unset or '*' — set it to your admin origin.");
   }
 
-  // Fare distance depends on this. The public demo is fair-use only and will
+  // Fare distance depends on a router. Google (Routes API) when the key is
+  // set; otherwise OSRM, whose public demo is fair-use only and will
   // rate-limit production traffic, silently degrading quotes to straight-line.
-  if (!process.env.OSRM_URL) {
+  if (!process.env.GOOGLE_MAPS_API_KEY && !process.env.OSRM_URL) {
     warn.push(
-      "OSRM_URL unset — using the public demo router (rate-limited). Self-host before real traffic.",
+      "GOOGLE_MAPS_API_KEY unset — routing, address search and geocoding use OpenStreetMap's free public servers (not for production).",
     );
   }
 

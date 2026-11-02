@@ -17,6 +17,7 @@ import enterpriseRoutes from "./enterprise.routes";
 import sosRoutes from "./sos.routes";
 import trackingRoutes from "./tracking.routes";
 import chatRoutes from "./chat.routes";
+import mapsRoutes from "./maps.routes";
 
 const router = Router();
 
@@ -58,6 +59,9 @@ router.use("/sos", sosRoutes);
 
 // Tracking routes
 router.use("/tracking", trackingRoutes);
+
+// Address search + reverse geocoding for the customer app (Google, server key)
+router.use("/maps", mapsRoutes);
 
 // Chat routes (user-facing REST: history + image upload; real-time via Socket.io)
 router.use("/chat", chatRoutes);

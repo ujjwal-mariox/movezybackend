@@ -1,4 +1,5 @@
 import { cache } from "../utils/redis.util";
+import { computeRoute } from "./google-maps.service";
 
 /**
  * Road routing.
@@ -7,13 +8,13 @@ import { cache } from "../utils/redis.util";
  * nothing ever asked for an actual route — and `distanceKm` is a haversine
  * straight-line figure for the same reason.
  *
- * This calls OSRM (the public demo router: no API key, OSM data, same source
- * as the map tiles the apps already render) and caches results, so a route is
- * fetched once per coordinate pair rather than on every map open.
+ * With GOOGLE_MAPS_API_KEY set this uses Google's Routes API; otherwise (or if
+ * Google fails) OSRM, whose public demo router is fair-use only and not for
+ * production. Results are cached, so a route is fetched once per coordinate
+ * pair rather than on every map open.
  *
- * Deliberately non-fatal: if the router is unreachable or rate-limited, this
- * returns null and callers fall back to the straight line rather than failing
- * the screen.
+ * Deliberately non-fatal: if no router answers, this returns null and callers
+ * fall back to the straight line rather than failing the screen.
  */
 
 const OSRM_BASE =
@@ -37,8 +38,8 @@ export interface RoadRoute {
   distanceKm: number;
   /** Router's duration estimate in minutes. */
   durationMin: number;
-  /** "osrm" when routed, "straight" when we fell back. */
-  source: "osrm" | "straight";
+  /** Which router answered ("straight" when none did). */
+  source: "google" | "osrm" | "straight";
 }
 
 export const getRoute = async (
@@ -64,6 +65,25 @@ export const getRoute = async (
     if (cached) return cached;
   } catch {
     // Cache unavailable — carry on and fetch live.
+  }
+
+  const google = await computeRoute([
+    { lat: fromLat, lng: fromLng },
+    { lat: toLat, lng: toLng },
+  ]);
+  if (google && google.points.length >= 2) {
+    const result: RoadRoute = {
+      coordinates: google.points,
+      distanceKm: Math.round((google.distanceMeters / 1000) * 100) / 100,
+      durationMin: Math.round(google.durationSec / 60),
+      source: "google",
+    };
+    try {
+      await cache.set(cacheKey, result, 86400);
+    } catch {
+      /* cache write is best-effort */
+    }
+    return result;
   }
 
   const url =
@@ -154,8 +174,11 @@ export interface LegsResult {
   durationMin: number;
   /** The router's free-flow estimate, for reference. Null if nothing routed. */
   routedDurationMin: number | null;
-  /** "osrm" when every leg was road-routed; "mixed" or "straight" otherwise. */
-  source: "osrm" | "mixed" | "straight";
+  /**
+   * The router when every leg was road-routed ("google" if any leg used it);
+   * "mixed" when some legs fell back to straight-line, "straight" when all did.
+   */
+  source: "google" | "osrm" | "mixed" | "straight";
 }
 
 export const getDistanceForLegs = async (
@@ -173,6 +196,7 @@ export const getDistanceForLegs = async (
   let km = 0;
   let routedMin = 0;
   let routed = 0;
+  let usedGoogle = false;
   for (let i = 0; i < clean.length - 1; i++) {
     const a = clean[i];
     const b = clean[i + 1];
@@ -186,6 +210,7 @@ export const getDistanceForLegs = async (
       km += route.distanceKm;
       routedMin += route.durationMin;
       routed++;
+      if (route.source === "google") usedGoogle = true;
     } else {
       km +=
         haversineKm(
@@ -204,6 +229,12 @@ export const getDistanceForLegs = async (
     durationMin: Math.max(5, Math.ceil((distanceKm / CITY_SPEED_KMPH) * 60)),
     routedDurationMin: routed > 0 ? Math.max(1, Math.round(routedMin)) : null,
     source:
-      routed === totalLegs ? "osrm" : routed > 0 ? "mixed" : "straight",
+      routed === totalLegs
+        ? usedGoogle
+          ? "google"
+          : "osrm"
+        : routed > 0
+          ? "mixed"
+          : "straight",
   };
 };

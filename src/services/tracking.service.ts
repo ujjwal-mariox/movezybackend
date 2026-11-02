@@ -5,7 +5,7 @@ import Booking from "../models/booking.model";
 import Driver from "../models/driver.model";
 import { cache } from "../utils/redis.util";
 import socketUtils from "../utils/socket.util";
-import config from "../config";
+import { computeRoute, isGoogleMapsConfigured } from "./google-maps.service";
 
 const LOCATION_CACHE_TTL = 60; // 1 minute
 const NEARBY_DRIVER_RADIUS = 5000; // 5km in meters
@@ -213,33 +213,43 @@ const calculateETA = async (
   origin: { lat: number; lng: number },
   destination: { lat: number; lng: number },
 ): Promise<{ distance: number; duration: number; durationText: string }> => {
-  const apiKey = config.maps.apiKey;
-  // Use real road distance/time from Google when a key is configured; otherwise
-  // fall back to the straight-line estimate (no fake precision).
-  if (apiKey) {
+  // Live-traffic road ETA from Google (Routes API; the Distance Matrix API
+  // this used can't be enabled on new Cloud projects) when a key is set;
+  // otherwise the straight-line estimate (no fake precision).
+  if (isGoogleMapsConfigured()) {
+    // The customer app polls this through the trip. Cache per ~110 m of
+    // driver movement for 2 minutes so a trip costs a handful of lookups,
+    // not one per poll.
+    const key = `eta:${origin.lat.toFixed(3)},${origin.lng.toFixed(3)}:${destination.lat.toFixed(
+      4,
+    )},${destination.lng.toFixed(4)}`;
     try {
-      const url =
-        `https://maps.googleapis.com/maps/api/distancematrix/json` +
-        `?origins=${origin.lat},${origin.lng}` +
-        `&destinations=${destination.lat},${destination.lng}` +
-        `&mode=driving&departure_time=now&key=${apiKey}`;
-      const resp = await fetch(url);
-      const data: any = await resp.json();
-      const el = data?.rows?.[0]?.elements?.[0];
-      if (data?.status === "OK" && el?.status === "OK") {
-        const distanceKm = (el.distance?.value ?? 0) / 1000;
-        // Prefer duration_in_traffic when available.
-        const durationSec =
-          el.duration_in_traffic?.value ?? el.duration?.value ?? 0;
-        const durationMin = Math.max(1, Math.ceil(durationSec / 60));
-        return {
-          distance: Math.round(distanceKm * 10) / 10,
-          duration: durationMin,
-          durationText: fmtDuration(durationMin),
-        };
+      const cached = await cache.get<{
+        distance: number;
+        duration: number;
+        durationText: string;
+      }>(key);
+      if (cached) return cached;
+    } catch {
+      /* cache is best-effort */
+    }
+    const route = await computeRoute([origin, destination], {
+      traffic: true,
+      polyline: false,
+    });
+    if (route) {
+      const durationMin = Math.max(1, Math.ceil(route.durationSec / 60));
+      const eta = {
+        distance: Math.round((route.distanceMeters / 1000) * 10) / 10,
+        duration: durationMin,
+        durationText: fmtDuration(durationMin),
+      };
+      try {
+        await cache.set(key, eta, 120);
+      } catch {
+        /* best-effort */
       }
-    } catch (err) {
-      console.warn("[tracking] Maps ETA failed, using estimate:", err);
+      return eta;
     }
   }
   return estimateETA(origin, destination);

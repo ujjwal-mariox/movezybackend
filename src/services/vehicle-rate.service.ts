@@ -1,6 +1,7 @@
 import VehicleType from "../models/vehicle-type.model";
 import { cache } from "../utils/redis.util";
 import { City } from "../models/master-data.model";
+import { reverseGeocode } from "./google-maps.service";
 
 /**
  * City-aware pricing for a vehicle type.
@@ -178,6 +179,13 @@ export const resolveCityFromCoords = async (
   const cached = await cache.get<string>(key);
   if (cached) return cached === "-" ? null : cached;
 
+  // Google (Geocoding API) when the key is set; Nominatim below otherwise.
+  const google = await reverseGeocode(lat, lng);
+  if (google?.city) {
+    await cache.set(key, google.city, 7 * 24 * 3600);
+    return google.city;
+  }
+
   try {
     const url =
       `https://nominatim.openstreetmap.org/reverse?format=jsonv2` +
@@ -318,6 +326,13 @@ export const resolveStateFromCoords = async (
   const key = `geo:state:${lat.toFixed(2)}:${lng.toFixed(2)}`;
   const cached = await cache.get<string>(key);
   if (cached) return cached === "-" ? null : cached;
+
+  // Google (Geocoding API) when the key is set; Nominatim below otherwise.
+  const google = await reverseGeocode(lat, lng);
+  if (google?.state) {
+    await cache.set(key, google.state, 30 * 24 * 3600);
+    return google.state;
+  }
 
   try {
     const url =
