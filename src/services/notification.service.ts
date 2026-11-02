@@ -900,14 +900,12 @@ export const notifyConsigneePickup = async (booking: any): Promise<boolean> => {
   // Guard against a retried pickup re-sending the same SMS.
   if (booking.consigneeNotifiedAt) return false;
 
-  const name = booking.receiverName ? `Hi ${booking.receiverName}, ` : "";
-  const ref = booking.bookingNumber ? ` (${booking.bookingNumber})` : "";
-  const dropTo = booking.drop?.address ? ` to ${booking.drop.address}` : "";
-  const message =
-    `${name}your parcel${ref} has been picked up and is on its way${dropTo}. ` +
-    `Track it in the Movezy app. - Movezy`;
-
-  const sent = await SmsService.sendSms(phone, message).catch(() => false);
+  // DLT-registered wording; variables are capped at 30 characters, which is
+  // why the drop address the old free-text message carried is gone.
+  const sent = await SmsService.sendTemplateSms(phone, "PARCEL_PICKED_UP", {
+    name: booking.receiverName || "there",
+    ref: booking.bookingNumber || "",
+  }).catch(() => false);
 
   if (sent) {
     // Stamp only on real delivery, so a failed send retries on a later event

@@ -15,13 +15,12 @@ import config from "../config";
 /**
  * Deliver a login OTP by SMS. Fire-and-forget: never block or fail the login
  * response on an SMS provider hiccup — the OTP is already stored in Redis.
- * When Twilio is unconfigured this is a logged no-op (dev uses the master OTP).
+ * With no SMS provider set this is a logged no-op (dev uses the master OTP).
  */
 const sendOtpSms = (mobileNumber: string, otp: string): void => {
-  SmsService.sendSms(
-    mobileNumber,
-    `${otp} is your Movezy verification code. It is valid for a few minutes. Do not share it with anyone.`,
-  ).catch(() => null);
+  SmsService.sendTemplateSms(mobileNumber, "CUSTOMER_OTP", { otp }).catch(
+    () => null,
+  );
 };
 
 export const login = async (

@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto";
 import { Types } from "mongoose";
 import {
   EmergencyContact,
@@ -18,14 +19,15 @@ const MAX_EMERGENCY_CONTACTS = 5;
 /**
  * Send an SMS for the SOS flow (emergency contacts, police, location-share).
  *
- * Delegates to the shared SMS service (Twilio). Kept as a re-export so existing
- * SOS callers are unchanged.
+ * Delegates to the shared SMS service (MSG91 or Twilio), using its DLT
+ * templates. Kept as a re-export for SOS callers.
  *
  * Still returns true only on actual dispatch, so callers record delivery state
- * honestly. ⚠️ SAFETY: if Twilio credentials are absent this returns false and
- * SOS contacts receive NOTHING — the credentials are what make SOS real.
+ * honestly. ⚠️ SAFETY: with no SMS provider (or no MSG91 template id for the
+ * SOS templates) this returns false and SOS contacts receive NOTHING — the
+ * credentials are what make SOS real.
  */
-export const sendSms = SmsService.sendSms;
+export const sendTemplateSms = SmsService.sendTemplateSms;
 
 /**
  * Add emergency contact
@@ -222,14 +224,19 @@ const notifyEmergencyContacts = async (sosAlert: ISOSAlert) => {
     personName = driver?.fullName || "Your contact";
   }
 
-  const locationUrl = `https://maps.google.com/?q=${sosAlert.location.coordinates[1]},${sosAlert.location.coordinates[0]}`;
-  const message = `🚨 EMERGENCY: ${personName} has triggered an SOS alert. Location: ${sosAlert.address || locationUrl}`;
+  // A map pin rather than the address: DLT caps variables at 30 characters,
+  // and "lat,lng" opens straight into the contact's maps app.
+  const [lng, lat] = sosAlert.location.coordinates;
+  const location = `${Number(lat).toFixed(6)},${Number(lng).toFixed(6)}`;
 
   // Dispatch via the single SMS integration point. Only record a contact as
-  // notified when the SMS was actually sent (sendSms returns true), so the
-  // alert reflects real delivery rather than assumed success.
+  // notified when the SMS was actually sent (sendTemplateSms returns true), so
+  // the alert reflects real delivery rather than assumed success.
   for (const contact of contacts) {
-    const sent = await sendSms(contact.phone, message);
+    const sent = await sendTemplateSms(contact.phone, "SOS_ALERT", {
+      name: personName,
+      location,
+    });
     if (sent) {
       sosAlert.contactsNotified.push({
         contactId: contact._id,
@@ -402,8 +409,9 @@ export const shareLiveLocation = async (
   const expiresAt = new Date();
   expiresAt.setMinutes(expiresAt.getMinutes() + duration);
 
-  // Generate unique share ID
-  const shareId = `share_${userId}_${bookingId}_${Date.now()}`;
+  // Short random share code: it goes into the SMS link, and DLT caps each
+  // variable at 30 characters (the old user+booking+timestamp id was ~70).
+  const shareId = randomBytes(8).toString("base64url");
 
   // Store the share in Redis with a TTL so the /track/:shareId link resolves
   // (previously commented out, so the share link pointed at nothing).
@@ -413,15 +421,16 @@ export const shareLiveLocation = async (
     duration * 60,
   );
 
-  // Notify emergency contacts with share link
+  // Notify emergency contacts with the share link (movezy.co/track/<code>, in
+  // the DLT template). Nothing serves that page yet.
   const contacts = await EmergencyContact.find({ userId, isActive: true });
-  const shareUrl = `https://movezy.app/track/${shareId}`;
-
   const user = await User.findById(userId);
-  const message = `${user?.name || "Your contact"} is sharing their live location with you: ${shareUrl}`;
 
   for (const contact of contacts) {
-    await sendSms(contact.phone, message);
+    await sendTemplateSms(contact.phone, "LOCATION_SHARE", {
+      name: user?.name || "Your contact",
+      code: shareId,
+    });
   }
 
   return { shareId, expiresAt };

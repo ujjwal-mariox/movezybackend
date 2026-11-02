@@ -80,11 +80,10 @@ export const driverLogin = async (
   );
 
   // Deliver the OTP by SMS. Fire-and-forget so an SMS outage never blocks login;
-  // no-op (logged) when Twilio is unconfigured — dev uses the master OTP.
-  SmsService.sendSms(
-    mobileNumber,
-    `${otp} is your Movezy driver verification code. Valid for a few minutes. Do not share it.`,
-  ).catch(() => null);
+  // no-op (logged) when no SMS provider is set — dev uses the master OTP.
+  SmsService.sendTemplateSms(mobileNumber, "DRIVER_OTP", { otp }).catch(
+    () => null,
+  );
 
   req.rData = {
     driverRegistered: !!driver,

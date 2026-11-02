@@ -86,12 +86,24 @@ const config = {
 
   // SMS/OTP Configuration
   sms: {
-    provider: optional("SMS_PROVIDER", "twilio"),
+    // "msg91" | "twilio". Empty = whichever is configured, MSG91 first.
+    provider: optional("SMS_PROVIDER"),
+    // MSG91 (Movezy's provider). Each message is a DLT-approved template;
+    // the ids come from MSG91 → SMS → Templates (see docs/sms-templates.md).
+    msg91AuthKey: optional("MSG91_AUTH_KEY"),
+    msg91BaseUrl: optional("MSG91_BASE_URL", "https://control.msg91.com"),
+    msg91Templates: {
+      CUSTOMER_OTP: optional("MSG91_TEMPLATE_CUSTOMER_OTP"),
+      DRIVER_OTP: optional("MSG91_TEMPLATE_DRIVER_OTP"),
+      PARCEL_PICKED_UP: optional("MSG91_TEMPLATE_PARCEL_PICKED_UP"),
+      SOS_ALERT: optional("MSG91_TEMPLATE_SOS_ALERT"),
+      LOCATION_SHARE: optional("MSG91_TEMPLATE_LOCATION_SHARE"),
+    },
     twilioAccountSid: optional("TWILIO_ACCOUNT_SID"),
     twilioAuthToken: optional("TWILIO_AUTH_TOKEN"),
     twilioPhoneNumber: optional("TWILIO_PHONE_NUMBER"),
     // Numbers are stored bare (no country code) across this codebase; used to
-    // build the E.164 form Twilio requires.
+    // build the international form both providers need.
     defaultCountryCode: optional("SMS_DEFAULT_COUNTRY_CODE", "+91"),
   },
 
