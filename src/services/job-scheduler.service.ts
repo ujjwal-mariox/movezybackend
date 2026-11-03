@@ -1,3 +1,4 @@
+import { runAccountDeletionJob } from "./account-deletion.service";
 import { AppConfig } from "../models/app-config.model";
 import { runDocumentExpiryJob } from "./document-expiry.service";
 import Driver from "../models/driver.model";
@@ -223,6 +224,17 @@ const runDueJobs = async (): Promise<void> => {
       cadenceMs: 24 * 60 * 60 * 1000,
       run: async () => {
         await runDocumentExpiryJob();
+      },
+    },
+    // Wipe accounts whose 30-day deletion grace period has run out.
+    {
+      key: "account-deletion",
+      cadenceMs: 24 * 60 * 60 * 1000,
+      run: async () => {
+        const done = await runAccountDeletionJob();
+        if (done.users || done.drivers) {
+          console.log(`[scheduler] account deletion: ${done.users} users, ${done.drivers} partners`);
+        }
       },
     },
   ];

@@ -1,3 +1,4 @@
+import { cancelPendingDeletion } from "../services/account-deletion.service";
 import { Request, Response, NextFunction } from "express";
 // Node's built-in RFC 4122 v4 generator, not the `uuid` package. uuid v13 is
 // ESM-only, so the CommonJS output this project compiles to could not require()
@@ -174,6 +175,8 @@ export const verifyDriverOtp = async (
         countryCode,
       });
     }
+    // Signing in again within the grace period keeps the account.
+    const deletionCancelled = await cancelPendingDeletion("driver", driver);
 
     const token = helpers().createJWT({ driverId: driver._id });
 
@@ -182,6 +185,7 @@ export const verifyDriverOtp = async (
       driverId: driver._id,
       status: driver.status,
       isNewDriver: !driver.fullName,
+      deletionCancelled,
     };
     req.msg = "otp_verified";
     return next();
@@ -206,6 +210,9 @@ export const verifyDriverOtp = async (
     });
   }
 
+  // Signing in again within the grace period keeps the account.
+  const deletionCancelled = await cancelPendingDeletion("driver", driver);
+
   const token = helpers().createJWT({ driverId: driver._id });
 
   req.rData = {
@@ -213,6 +220,7 @@ export const verifyDriverOtp = async (
     driverId: driver._id,
     status: driver.status,
     isNewDriver: !driver.fullName,
+    deletionCancelled,
   };
   req.msg = "otp_verified";
   next();

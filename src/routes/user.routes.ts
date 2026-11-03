@@ -9,6 +9,7 @@ import ResponseMiddleware from "../middlewares/response.middleware";
 import AuthMiddleware from "../middlewares/auth.middleware";
 import UsersValidator from "../validators/users.validator";
 import upload from "../middlewares/upload.middleware";
+import * as AccountDeletionController from "../controllers/account-deletion.controller";
 
 const userRouter = Router();
 
@@ -130,6 +131,24 @@ userRouter.get(
   "/referral/stats",
   AuthMiddleware().verifyUserToken,
   ErrorHandlerMiddleware(ReferralController.getReferralStats),
+  ResponseMiddleware
+);
+
+/**
+ * Delete my account (both app stores require it): GET = what's in the way and
+ * what money would be lost; POST = schedule it (login closes, 30 days to undo
+ * by signing in again).
+ */
+userRouter.get(
+  "/account/deletion",
+  AuthMiddleware().verifyUserToken,
+  ErrorHandlerMiddleware(AccountDeletionController.getDeletionCheck),
+  ResponseMiddleware
+);
+userRouter.post(
+  "/account/deletion",
+  AuthMiddleware().verifyUserToken,
+  ErrorHandlerMiddleware(AccountDeletionController.requestDeletion),
   ResponseMiddleware
 );
 

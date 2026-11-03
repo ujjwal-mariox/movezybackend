@@ -8,7 +8,7 @@ All five fit in one SMS (160 characters or fewer), use plain text without emoji,
 
 1. Register Movezy as a **Principal Entity** and note the **PE ID** (Entity ID).
 2. Register the **header** (sender ID) `MOVEZY`, type Service / Transactional.
-3. **Whitelist the URLs** used in templates 4 and 5: `https://maps.google.com` and `https://movezy.co`. SMS carrying links that are not whitelisted are blocked.
+3. **Whitelist the URL** used in template 4: `https://maps.google.com`. Add `https://movezy.co` too if template 5 is registered later. SMS carrying links that are not whitelisted are blocked.
 4. Register each **content template** below. Template type: **Service Implicit**. Use the "DLT text" column exactly, with `{#var#}` where shown, then note each **DLT template ID**.
 
 | # | Purpose | DLT text |
@@ -17,7 +17,7 @@ All five fit in one SMS (160 characters or fewer), use plain text without emoji,
 | 2 | Driver (partner) login OTP | `{#var#} is your Movezy driver verification code. Valid for a few minutes. Do not share it.` |
 | 3 | Parcel picked up, sent to the receiver | `Hi {#var#}, your Movezy parcel {#var#} has been picked up and is on its way. Track it in the Movezy app. - Movezy` |
 | 4 | SOS alert to emergency contacts | `EMERGENCY: {#var#} has triggered an SOS alert on Movezy. Location: https://maps.google.com/?q={#var#} - Movezy` |
-| 5 | Live location share to emergency contacts | `{#var#} is sharing their live location with you on Movezy: https://movezy.co/track/{#var#} - Movezy` |
+| 5 | Live location share to emergency contacts (**not needed yet: skip it**) | `{#var#} is sharing their live location with you on Movezy: https://movezy.co/track/{#var#} - Movezy` |
 
 ## 2. In MSG91 (control.msg91.com)
 
@@ -58,7 +58,7 @@ MSG91_TEMPLATE_LOCATION_SHARE=<MSG91 template id>
 
 **Before go-live:**
 - Remove `MASTER_OTP` once a real OTP arrives on a test phone.
-- The link in template 5 starts working once the `/track` page exists on movezy.co. That page isn't built yet.
+- Template 5 (live-location share) is for a feature that isn't built yet: there's no `/track` page, and nothing in the apps sends it. Don't register it on DLT for now; the backend skips it while it has no template ID.
 
 ## What the recipient sees
 

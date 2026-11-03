@@ -1,5 +1,5 @@
 import { Upload } from "@aws-sdk/lib-storage";
-import { S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectsCommand, S3Client } from "@aws-sdk/client-s3";
 import config from "../config";
 import { Express } from "express";
 
@@ -118,4 +118,41 @@ export default {
   uploadFileToAws,
   uploadBufferToAws,
   uploadMultipleFilesToAws,
+};
+
+/**
+ * Delete stored files by the URLs we saved for them (profile photos, licence
+ * and RC images) — used when a deleted account is wiped. Only keys under
+ * uploads/ in our bucket are touched; anything else is ignored. Never throws:
+ * a storage hiccup must not stop the rest of the wipe. Returns how many were
+ * removed.
+ */
+export const deleteFilesFromAws = async (
+  urls: (string | null | undefined)[],
+): Promise<number> => {
+  const keys = new Set<string>();
+  for (const url of urls) {
+    if (!url) continue;
+    try {
+      const u = new URL(url);
+      if (!u.hostname.includes(config.aws.bucket)) continue;
+      const key = decodeURIComponent(u.pathname.replace(/^\//, ""));
+      if (key.startsWith("uploads/")) keys.add(key);
+    } catch {
+      /* not a URL we stored */
+    }
+  }
+  if (keys.size === 0) return 0;
+  try {
+    const res = await s3Client.send(
+      new DeleteObjectsCommand({
+        Bucket: config.aws.bucket,
+        Delete: { Objects: [...keys].map((Key) => ({ Key })), Quiet: true },
+      }),
+    );
+    return keys.size - (res.Errors?.length || 0);
+  } catch (err: any) {
+    console.warn(`[s3] delete of ${keys.size} files failed: ${err?.message || err}`);
+    return 0;
+  }
 };

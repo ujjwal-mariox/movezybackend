@@ -118,6 +118,10 @@ const DriverSchema = new Schema<IDriver>(
       index: true,
     },
     deletedAt: Date,
+    // Self-service deletion: login closes on request, signing in again within
+    // 30 days cancels, then the account-deletion job anonymises the partner.
+    deletionRequestedAt: { type: Date, default: null },
+    deletionScheduledFor: { type: Date, default: null, index: true },
     currentBookingId: {
       type: Schema.Types.ObjectId,
       ref: "Booking",

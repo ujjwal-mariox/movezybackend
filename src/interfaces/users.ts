@@ -16,6 +16,10 @@ export interface IUser extends Document {
   whatsappOptIn?: boolean;
   isActive: boolean;
   isDeleted: boolean;
+  /** Self-service deletion: when asked, and when the wipe runs (30 days on). */
+  deletionRequestedAt?: Date | null;
+  deletionScheduledFor?: Date | null;
+  deletedAt?: Date | null;
   isBlocked?: boolean;
   blockedAt?: Date | null;
   blockReason?: string | null;

@@ -1,3 +1,4 @@
+import { cancelPendingDeletion } from "../services/account-deletion.service";
 import { Request, Response, NextFunction } from "express";
 // Node's built-in RFC 4122 v4 generator, not the `uuid` package. uuid v13 is
 // ESM-only, so the CommonJS output this project compiles to could not require()
@@ -116,11 +117,13 @@ export const verifyOtp = async (
     if (!user) {
       user = await UserService.addUsers({ mobileNumber });
     }
+    // Signing in again within the grace period keeps the account.
+    const deletionCancelled = await cancelPendingDeletion("user", user);
 
     const token = helpers().createJWT({ userId: user._id });
     await UserService.updateUsers(user._id, { token });
 
-    req.rData = { token, userId: user._id };
+    req.rData = { token, userId: user._id, deletionCancelled };
     req.msg = "otp_verified";
     return next();
   }
@@ -143,11 +146,13 @@ export const verifyOtp = async (
   if (!user) {
     user = await UserService.addUsers({ mobileNumber, whatsappOptIn });
   }
+  // Signing in again within the grace period keeps the account.
+  const deletionCancelled = await cancelPendingDeletion("user", user);
 
   const token = helpers().createJWT({ userId: user._id });
   await UserService.updateUsers(user._id, { token, whatsappOptIn });
 
-  req.rData = { token, userId: user._id };
+  req.rData = { token, userId: user._id, deletionCancelled };
   req.msg = "otp_verified";
   next();
 };

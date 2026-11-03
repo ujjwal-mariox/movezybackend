@@ -77,6 +77,9 @@ export interface IDriver {
   lastSocketDisconnectAt?: Date;
   isDeleted: boolean;
   deletedAt?: Date;
+  /** Self-service deletion: when asked, and when the wipe runs (30 days on). */
+  deletionRequestedAt?: Date | null;
+  deletionScheduledFor?: Date | null;
 
   currentBookingId?: Types.ObjectId;
   rating?: number;

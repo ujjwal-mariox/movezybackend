@@ -3,6 +3,8 @@ import DriverAuthMiddleware from "../middlewares/driver-auth.middleware";
 import ErrorHandlerMiddleware from "../middlewares/error-handler.middleware";
 import ResponseMiddleware from "../middlewares/response.middleware";
 import * as DriverController from "../controllers/driver.controller";
+import * as SOSController from "../controllers/sos.controller";
+import * as AccountDeletionController from "../controllers/account-deletion.controller";
 import * as ChatController from "../controllers/chat.controller";
 import * as DriverPresenceController from "../controllers/driver-presence.controller";
 import * as CallController from "../controllers/call.controller";
@@ -526,6 +528,28 @@ driverRouter.post(
   ResponseMiddleware,
 );
 
+// Emergency contacts: the people a driver's SOS texts. Same store and
+// handlers as the customer app's; the handlers read the owner from req.user.
+const asContactOwner = (req: any, _res: any, next: any) => {
+  req.user = { _id: req.driver._id };
+  next();
+};
+driverRouter.get(
+  "/sos/contacts",
+  asContactOwner,
+  ErrorHandlerMiddleware(SOSController.getEmergencyContacts),
+);
+driverRouter.post(
+  "/sos/contacts",
+  asContactOwner,
+  ErrorHandlerMiddleware(SOSController.addEmergencyContact),
+);
+driverRouter.delete(
+  "/sos/contacts/:contactId",
+  asContactOwner,
+  ErrorHandlerMiddleware(SOSController.deleteEmergencyContact),
+);
+
 // =====================
 // SUPPORT
 // =====================
@@ -725,6 +749,19 @@ driverRouter.post(
   "/chat/:bookingId/upload-image",
   upload.any(),
   ErrorHandlerMiddleware(ChatController.uploadChatImage),
+  ResponseMiddleware,
+);
+
+// Delete my account: GET = blockers (live trip, unpaid earnings, payout in
+// progress) and money that would be lost; POST = schedule it.
+driverRouter.get(
+  "/account/deletion",
+  ErrorHandlerMiddleware(AccountDeletionController.getDeletionCheck),
+  ResponseMiddleware,
+);
+driverRouter.post(
+  "/account/deletion",
+  ErrorHandlerMiddleware(AccountDeletionController.requestDeletion),
   ResponseMiddleware,
 );
 

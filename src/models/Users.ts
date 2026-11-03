@@ -84,6 +84,12 @@ const UserSchema: Schema<IUser> = new Schema(
       default: false,
       index: true,
     },
+    // Self-service deletion (both app stores require it): on request the
+    // login closes; signing in again within 30 days cancels; after that the
+    // account-deletion job anonymises the account. Trips and invoices stay.
+    deletionRequestedAt: { type: Date, default: null },
+    deletionScheduledFor: { type: Date, default: null, index: true },
+    deletedAt: { type: Date, default: null },
     notificationAllowed: {
       type: Boolean,
       default: true,

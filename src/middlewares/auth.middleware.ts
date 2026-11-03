@@ -38,6 +38,12 @@ const AuthMiddleware = () => {
         throw new Error("ac_deactivated");
       }
 
+      // Deletion requested: the login is closed until the person signs in
+      // again (which cancels it) or the wipe runs.
+      if (user.deletionRequestedAt) {
+        throw new Error("account_deletion_pending");
+      }
+
       // attach userId to request body
       (req as any).userId = user._id;
       (req as any).user = user;
@@ -45,7 +51,9 @@ const AuthMiddleware = () => {
     } catch (ex: any) {
       req.rCode = 3;
       req.msg =
-        ex.message === "ac_deactivated" ? "ac_deactivated" : "invalid_token";
+        ex.message === "ac_deactivated" || ex.message === "account_deletion_pending"
+          ? ex.message
+          : "invalid_token";
 
       return ResponseMiddleware(req, res, next);
     }

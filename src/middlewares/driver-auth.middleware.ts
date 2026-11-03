@@ -32,12 +32,24 @@ export default () => {
 
         // Verify driver exists and is active
         const Driver = (await import("../models/driver.model")).default;
-        const driver = await Driver.findById(decoded.driverId).select("status isActive isDeleted");
+        const driver = await Driver.findById(decoded.driverId).select(
+          "status isActive isDeleted deletionRequestedAt",
+        );
 
         if (!driver || driver.isDeleted) {
           return res.status(401).json({
             rCode: 0,
             rMsg: "driver_not_found",
+            rData: {},
+          });
+        }
+
+        // Deletion requested: login closed until the driver signs in again
+        // (which cancels it) or the wipe runs.
+        if (driver.deletionRequestedAt) {
+          return res.status(401).json({
+            rCode: 0,
+            rMsg: "account_deletion_pending",
             rData: {},
           });
         }
