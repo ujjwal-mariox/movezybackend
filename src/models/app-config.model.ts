@@ -46,6 +46,8 @@ export interface IFareConfig {
   minimumFare: number;
   waitingChargePerMin: number;
   freeWaitingMinutes: number;
+  /** Cash dues (₹) above which a driver can't go online; 0 = no limit. */
+  driverCashDueLimit: number;
   nightSurgeMultiplier: number;
   nightSurgeStartHour: number;
   nightSurgeEndHour: number;
@@ -179,6 +181,11 @@ const FareConfigSchema = new Schema<IFareConfig>(
     freeWaitingMinutes: {
       type: Number,
       default: 10,
+      min: 0,
+    },
+    driverCashDueLimit: {
+      type: Number,
+      default: 0,
       min: 0,
     },
     nightSurgeMultiplier: {

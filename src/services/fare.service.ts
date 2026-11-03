@@ -275,9 +275,10 @@ export const calculateFare = async (
   // Get surge multiplier
   const surge = surgeAt(fareConfig, input.scheduledTime, input.city);
   const surgeMultiplier = surge.multiplier;
-  const baseFareWithSurge = baseFare + distanceCharge + timeCharge;
-  const surgeCharge =
-    surgeMultiplier > 1 ? baseFareWithSurge * (surgeMultiplier - 1) : 0;
+  // Surge multiplies the base fare only (client rule, 2026-11-04): 1.5x on a
+  // ₹50 base adds ₹25, whatever the distance. It used to multiply base +
+  // distance, so on longer trips the surge line outgrew the base fare itself.
+  const surgeCharge = surgeMultiplier > 1 ? baseFare * (surgeMultiplier - 1) : 0;
 
   // Calculate addon charges.
   //

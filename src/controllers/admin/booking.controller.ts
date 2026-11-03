@@ -13,6 +13,7 @@ import * as bookingDispatchService from "../../services/booking-dispatch.service
 import { runAutoAssignSweep } from "../../services/auto-assign.service";
 import * as PaymentService from "../../services/payment.service";
 import * as EnterpriseService from "../../services/enterprise.service";
+import * as PromoService from "../../services/promo.service";
 
 /**
  * Get all bookings with filters
@@ -129,6 +130,11 @@ export const cancelBooking = async (req: Request, res: Response) => {
   booking.refundStatus = refundAmount > 0 ? "PENDING" : "NONE";
 
   await booking.save();
+
+  // The customer gets the coupon back for their next booking.
+  await PromoService.releasePromoForBooking(booking._id as Types.ObjectId).catch(
+    (e) => console.error("Failed to release coupon on admin cancellation:", e),
+  );
 
   // Return the enterprise credit this booking consumed — usedCredit was never
   // decremented anywhere, so an enterprise's utilisation only went up. If the

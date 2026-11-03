@@ -87,6 +87,7 @@ export const createPayout = async (req: Request, res: Response) => {
       message:
         `Only ₹${balance.available.toFixed(2)} is available for payout. ` +
         `Lifetime earnings ₹${balance.lifetimeEarnings.toFixed(2)}, ` +
+        `₹${balance.cashHeld.toFixed(2)} already collected in cash, ` +
         `₹${balance.reserved.toFixed(2)} already requested or paid.`,
       data: balance,
     });

@@ -80,6 +80,11 @@ export const checkDeletion = async (
         `You have ₹${balance.available.toFixed(2)} in earnings. Withdraw it first.`,
       );
     }
+    if (balance && balance.dues > 0) {
+      blockers.push(
+        `You owe Movezy ₹${balance.dues.toFixed(2)} from cash trips. Pay it from Wallet → Add money first.`,
+      );
+    }
   }
 
   const [wallet, coins] = await Promise.all([

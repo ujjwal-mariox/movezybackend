@@ -1439,6 +1439,10 @@ export const cancelScheduledBooking = async (req: Request, res: Response) => {
     booking.cancelledBy = "USER";
     await booking.save();
 
+    await PromoService.releasePromoForBooking(booking._id as Types.ObjectId).catch(
+      (e) => console.error("Failed to release coupon on cancellation:", e),
+    );
+
     // Return the credit this booking consumed, capped by the same stage ceiling
     // a cash refund would honour. A scheduled booking is normally still DRAFT,
     // so this is usually a full release.
@@ -1720,6 +1724,12 @@ export const cancelBooking = async (req: Request, res: Response) => {
         console.error("Failed to restore coins on cancellation:", coinErr);
       }
     }
+
+    // Give back the coupon, so it works on the customer's next booking. This
+    // also covers a failed online payment: the app cancels that booking.
+    await PromoService.releasePromoForBooking(booking._id as Types.ObjectId).catch(
+      (e) => console.error("Failed to release coupon on cancellation:", e),
+    );
 
     // 3. Free the driver. Completing a trip and driver-side cancel both clear
     // currentBookingId, but user-side cancel never did — so the admin tracking

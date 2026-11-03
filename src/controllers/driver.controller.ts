@@ -1113,6 +1113,10 @@ export const getWithdrawalInfo = async (
       available: balance.available,
       lifetimeEarnings: balance.lifetimeEarnings,
       reserved: balance.reserved,
+      // Cash trips netted off: what the driver holds and any amount they owe.
+      cashHeld: balance.cashHeld,
+      walletPaidIn: balance.walletPaidIn,
+      dues: balance.dues,
       minWithdrawal: DriverPayoutService.MIN_WITHDRAWAL,
       hasBankDetails,
       bankName: bank.bankName || null,
@@ -1908,8 +1912,13 @@ export const collectCashPayment = async (
     }
 
     // Clearing the top-up is what records that the driver actually took it;
-    // leaving it set would keep demanding the money on every reopen.
-    if (topUp > 0) (booking as any).pendingCashTopUp = 0;
+    // leaving it set would keep demanding the money on every reopen. The
+    // amount moves to cashTopUpCollected, which payouts net off.
+    if (topUp > 0) {
+      (booking as any).cashTopUpCollected =
+        Math.round((Number((booking as any).cashTopUpCollected ?? 0) + topUp) * 100) / 100;
+      (booking as any).pendingCashTopUp = 0;
+    }
     // Only a COD fare becomes PAID here — a prepaid fare already was.
     if (booking.paymentMethod === "CASH") booking.paymentStatus = "PAID";
     await booking.save();
@@ -2105,6 +2114,22 @@ export const toggleOnlineStatus = async (
           trainingComplete: false,
           completedRequired: gate.completedRequired,
           totalRequired: gate.totalRequired,
+        };
+        return next();
+      }
+
+      // Cash dues gate: Movezy's share of cash trips is netted against payouts,
+      // and a driver owing more than the admin's limit stays offline until they
+      // pay it in through the wallet. Off while the limit is 0 (the default).
+      const cash = await DriverPayoutService.cashDuesBlock(driverId);
+      if (cash.blocked) {
+        req.rCode = 4;
+        req.msg = `Clear your cash dues of ₹${cash.dues} to go online. Pay them from Wallet → Add money.`;
+        req.rData = {
+          isOnline: false,
+          status: driver.status,
+          cashDues: cash.dues,
+          cashDueLimit: cash.limit,
         };
         return next();
       }

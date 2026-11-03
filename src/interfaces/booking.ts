@@ -172,6 +172,8 @@ export interface IBooking {
    * has to collect in cash at delivery.
    */
   pendingCashTopUp?: number;
+  /** Top-ups already collected in cash on a prepaid booking (for payouts). */
+  cashTopUpCollected?: number;
 
   // Cancellation
   cancellationReasonId?: Types.ObjectId;

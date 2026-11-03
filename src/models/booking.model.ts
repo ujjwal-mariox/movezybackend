@@ -243,6 +243,9 @@ const BookingSchema = new Schema<IBooking>(
     // at delivery — so the booking stays PAID for what was actually paid and
     // this holds what is still owed.
     pendingCashTopUp: { type: Number, default: 0 },
+    // Top-ups the driver has collected in cash on a prepaid booking. Kept
+    // after pendingCashTopUp is cleared, so payouts can net the cash off.
+    cashTopUpCollected: { type: Number, default: 0 },
 
     // Cancellation
     cancellationReasonId: {

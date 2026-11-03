@@ -147,6 +147,38 @@ export const applyPromoCode = async (
 };
 
 /**
+ * Give a coupon back when its booking is cancelled (client rule, 2026-11-04):
+ * any cancellation, by anyone, including the app cancelling a booking whose
+ * online or wallet payment failed. Only completed trips keep a coupon used.
+ *
+ * Removes this booking's usage row, which reopens the per-user limit, and
+ * lowers the code's usedCount by the rows actually removed, so calling it
+ * twice changes nothing. Returns how many uses were released.
+ */
+export const releasePromoForBooking = async (
+  bookingId: Types.ObjectId | string,
+): Promise<number> => {
+  const rows = await PromoUsage.find({ bookingId }).select("promoCodeId").lean();
+  if (!rows.length) return 0;
+
+  const { deletedCount } = await PromoUsage.deleteMany({ bookingId });
+  if (!deletedCount) return 0;
+
+  const perCode = new Map<string, number>();
+  for (const r of rows) {
+    const id = String(r.promoCodeId);
+    perCode.set(id, (perCode.get(id) || 0) + 1);
+  }
+  for (const [promoCodeId, uses] of perCode) {
+    await PromoCode.updateOne(
+      { _id: promoCodeId, usedCount: { $gte: uses } },
+      { $inc: { usedCount: -uses } },
+    );
+  }
+  return deletedCount;
+};
+
+/**
  * Create promo code (Admin)
  */
 export const createPromoCode = async (data: Partial<IPromoCode>) => {
