@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import VehicleType from "../models/vehicle-type.model";
 import PromoCode from "../models/promo-code.model";
 import { FareConfig } from "../models/app-config.model";
+import { CATEGORY_LABELS, sortVehicleTypes } from "../utils/vehicle-order";
 
 /**
  * GET /v1/api/home
@@ -10,12 +11,6 @@ import { FareConfig } from "../models/app-config.model";
  */
 let cachedDeliveryCount: { value: number; at: number } | null = null;
 
-const CATEGORY_LABELS: Record<string, string> = {
-  "2W": "2 Wheeler",
-  "3W": "3 Wheeler",
-  "4W": "4 Wheeler",
-  HV: "Heavy Vehicle",
-};
 
 /**
  * One home card per category when a category shows more than one of its
@@ -56,7 +51,8 @@ const collapseCategories = (types: any[]): any[] => {
 };
 
 export const getHomePage = async (req: Request, res: Response) => {
-  // Fetch active, non-deleted vehicle types sorted by sortOrder
+  // Active, non-deleted vehicle types: categories by size, then smallest to
+  // largest within each (utils/vehicle-order), one card per category.
   const vehicleTypes = await VehicleType.find({
     isActive: true,
     isDeleted: false,
@@ -68,9 +64,8 @@ export const getHomePage = async (req: Request, res: Response) => {
     .select(
       "name description maxWeightKg lengthFt breadthFt heightFt baseFare perKmRate perMinuteRate image icon sortOrder allowIntraCity allowInterCity minRangeKm maxRangeKm showOnHomeScreen categoryCode isDefaultForCategory"
     )
-    .sort({ sortOrder: 1, name: 1 })
     .lean()
-    .then(collapseCategories);
+    .then((types) => collapseCategories(sortVehicleTypes(types)));
 
   // Fetch active, non-expired promo codes for banners
   const now = new Date();

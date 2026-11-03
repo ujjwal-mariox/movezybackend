@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { categoriesOf, sortVehicleTypes } from "../../utils/vehicle-order";
 import * as FareService from "../../services/fare.service";
 import {
   FareConfig,
@@ -1539,12 +1540,21 @@ export const getAllMasterData = async (_req: Request, res: Response) => {
     // Admin-managed vehicle catalog for the Add Vehicle dropdown. `_id` is the
     // vehicleTypeId dispatch matches on, so the app must submit it (not a name).
     VehicleType.find({ isActive: true, isDeleted: false })
-      .sort({ sortOrder: 1, name: 1 })
       // categoryCode lets the app switch a 2W to Scooter/Bike + Petrol/Electric.
-      .select("name icon image categoryCode"),
+      .select("name icon image categoryCode maxWeightKg lengthFt")
+      .lean(),
   ]);
 
-  res.locals.data = { cities, bodyTypes, fuelTypes, vehicleTypes };
+  // The partner picks a category first, then a vehicle in it, both in the
+  // shared order (utils/vehicle-order).
+  const orderedTypes = sortVehicleTypes(vehicleTypes);
+  res.locals.data = {
+    cities,
+    bodyTypes,
+    fuelTypes,
+    vehicleTypes: orderedTypes,
+    vehicleCategories: categoriesOf(orderedTypes),
+  };
 };
 
 /**

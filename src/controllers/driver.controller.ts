@@ -2039,15 +2039,9 @@ export const getBookingDetails = async (
     (booking as any).deliveryOtpRequired = Boolean((booking as any).deliveryOtp);
     delete (booking as any).deliveryOtp;
 
-    // Numbers are shown masked; calls go through POST /bookings/:id/call so
-    // neither party ever sees the other's real number.
-    if ((booking as any).userId && typeof (booking as any).userId === "object") {
-      (booking as any).userId.mobileNumber = presentPhone((booking as any).userId.mobileNumber);
-    }
-    for (const loc of [(booking as any).pickup, (booking as any).drop, ...((booking as any).stops || [])]) {
-      if (loc?.contactPhone) loc.contactPhone = presentPhone(loc.contactPhone);
-    }
-
+    // The customer's number is shown masked and calls go through POST
+    // /bookings/:id/call; a sender or receiver they named is shown in full.
+    // scrubOtps does both, comparing contacts against the customer's number.
     req.rData = scrubOtps((booking as any).toObject?.() ?? booking);
     req.msg = "booking_fetched";
     next();
@@ -2781,6 +2775,27 @@ export const deleteVehicle = async (
  * lifecycle handlers (arrive/verify/start/complete/cancel/history) returned
  * raw booking docs and leaked both codes right back.
  */
+/**
+ * A sender or receiver the customer named goes to the driver in full, so the
+ * driver can call them (client decision, 2026-11-04). The customer's own
+ * number stays masked, even when it was entered as the sender or receiver;
+ * calls to the customer go through the masked call route. When the
+ * customer's number is unknown, or already masked and ends in the same four
+ * digits, the contact is masked to be safe.
+ */
+function presentContactPhone(phone: unknown, customerPhone: unknown): string {
+  const digits = (v: unknown) => String(v ?? "").replace(/\D/g, "");
+  const p = digits(phone);
+  if (!p) return "";
+  const c = String(customerPhone ?? "");
+  const cDigits = digits(c);
+  if (!cDigits) return presentPhone(String(phone));
+  const sameAsCustomer = /x/i.test(c)
+    ? p.slice(-4) === cDigits.slice(-4)
+    : p.slice(-10) === cDigits.slice(-10);
+  return sameAsCustomer ? presentPhone(String(phone)) : String(phone);
+}
+
 function scrubOtps<T>(booking: T): T {
   if (booking && typeof booking === "object") {
     // Idempotent: an already-scrubbed object (getBookingDetails strips the
@@ -2792,12 +2807,15 @@ function scrubOtps<T>(booking: T): T {
     delete (booking as any).otp;
     delete (booking as any).deliveryOtp;
     const b: any = booking;
+    // Read before it is masked: the contacts below compare against it.
+    const customerPhone =
+      b.userId && typeof b.userId === "object" ? b.userId.mobileNumber : undefined;
     if (b.userId && typeof b.userId === "object" && b.userId.mobileNumber) {
       b.userId.mobileNumber = presentPhone(b.userId.mobileNumber);
     }
-    if (b.receiverPhone) b.receiverPhone = presentPhone(b.receiverPhone);
+    if (b.receiverPhone) b.receiverPhone = presentContactPhone(b.receiverPhone, customerPhone);
     for (const loc of [b.pickup, b.drop, ...(Array.isArray(b.stops) ? b.stops : [])]) {
-      if (loc?.contactPhone) loc.contactPhone = presentPhone(loc.contactPhone);
+      if (loc?.contactPhone) loc.contactPhone = presentContactPhone(loc.contactPhone, customerPhone);
     }
   }
   return booking;

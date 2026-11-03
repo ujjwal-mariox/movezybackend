@@ -30,6 +30,7 @@ import { resolveBookingCity } from "../services/vehicle-rate.service";
 import { computeBookingTax } from "../services/tax.service";
 import { presentPhone } from "../services/call-masking.service";
 import { validRoutePoint, vehicleIneligibility, vehicleEligibilityMessage } from "../services/vehicle-eligibility.service";
+import { compareVehicleTypes } from "../utils/vehicle-order";
 
 /** The driver's number as the customer may see it (masked when number hiding is on). */
 const maskDriver = <T,>(b: T): T => {
@@ -354,7 +355,21 @@ export const createBooking = async (req: Request, res: Response) => {
       notes,
       receiverName,
       receiverPhone,
+      senderName,
+      senderPhone,
     } = req.body;
+
+    // Sender details (client feedback, 2026-10-26): sent only when someone
+    // other than the customer hands over the goods; they become the pickup
+    // contact the driver calls. Empty means the customer is the sender.
+    const pickupContact = {
+      ...(typeof senderName === "string" && senderName.trim()
+        ? { contactName: senderName.trim().slice(0, 60) }
+        : {}),
+      ...(typeof senderPhone === "string" && senderPhone.replace(/\D/g, "")
+        ? { contactPhone: senderPhone.replace(/\D/g, "").slice(-10) }
+        : {}),
+    };
 
     // The map picker's on-screen labels must never be stored as a real address.
     // Older app builds returned whatever was showing when Confirm was tapped, so
@@ -676,6 +691,7 @@ export const createBooking = async (req: Request, res: Response) => {
         lng: pickupLocation.lng,
         ...(bookingCity ? { city: bookingCity } : {}),
         ...(pickupState || pickupLocation?.state ? { state: pickupState || pickupLocation?.state } : {}),
+        ...pickupContact,
       },
       drop: {
         address: safeDropAddress,
@@ -2070,6 +2086,10 @@ export const getVehicleOptions = async (req: Request, res: Response) => {
     }
 
     if (options.length > 0) options[0].isRecommended = true;
+    // The score only picks the recommended vehicle. The list itself follows the
+    // shared order (categories by size, then smallest to largest), so the app
+    // can show a category's vehicles in a predictable sequence.
+    options.sort((a: any, b: any) => compareVehicleTypes(a.vehicleType, b.vehicleType));
 
     // Admin-managed automatic discount (strikethrough pricing). Attached per
     // option so the app can show original vs discounted; `fare` stays the
