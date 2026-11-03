@@ -18,6 +18,7 @@ import * as RewardService from "../services/reward.service";
 import * as WalletService from "../services/wallet.service";
 import * as CoinService from "../services/coin.service";
 import * as SupportService from "../services/support.service";
+import * as SupportFlow from "../services/support-flow.service";
 import DriverInstruction from "../models/driver-instruction.model";
 import Badge from "../models/badge.model";
 import TrainingMaterial from "../models/training-material.model";
@@ -3992,9 +3993,14 @@ export const raiseTicket = async (
 ) => {
   try {
     const driverId = (req as any).driverId;
-    const { category, subject, message, description, bookingId, priority } =
-      req.body;
+    const { message, description, bookingId, supportNodeId } = req.body;
     const desc = description || message;
+    // An issue picked in the guided chat sets the category, subject, priority
+    // and path, so the agent sees what was already covered.
+    const flow = SupportFlow.ticketFieldsFor("DRIVER", supportNodeId);
+    const category = flow?.category || req.body.category;
+    const subject = req.body.subject || (flow ? `Partner support — ${flow.pathLabel}` : undefined);
+    const priority = req.body.priority || flow?.priority;
 
     if (!category || !subject || !desc) {
       req.rCode = 0;
@@ -4006,6 +4012,8 @@ export const raiseTicket = async (
     const ticket = await SupportService.createTicket({
       driverId: new Types.ObjectId(driverId),
       category,
+      subcategory: flow?.subcategory,
+      supportPath: flow?.supportPath,
       subject,
       description: desc,
       priority,
@@ -4075,7 +4083,16 @@ export const getTicketDetails = async (
       "DRIVER",
     );
 
-    req.rData = { ticket, messages };
+    req.rData = {
+      ticket,
+      messages,
+      // Chips for the driver's reply after an agent message.
+      followUps: SupportFlow.followUpsFor(
+        "DRIVER",
+        (ticket as any).supportPath,
+        String(req.query.lang || "en"),
+      ),
+    };
     req.msg = "ticket_fetched";
     next();
   } catch (error) {
@@ -4694,4 +4711,17 @@ export const getIncomingOffers = async (req: Request, res: Response, next: NextF
     req.msg = "success";
     next();
   } catch (error) { next(error); }
+};
+
+/**
+ * The guided support conversation for the partner app (topic → issue →
+ * answer), in ?lang= (falls back to English).
+ */
+export const getSupportFlow = async (
+  req: Request,
+  _res: Response,
+  next: NextFunction,
+) => {
+  req.rData = { flow: SupportFlow.getFlow("DRIVER", String(req.query.lang || "en")) };
+  next();
 };

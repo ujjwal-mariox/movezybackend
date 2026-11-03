@@ -14,6 +14,8 @@ const router = Router();
 // admin-managed FAQs never reached drivers no matter what was published.
 // Registered before the auth middleware below so it stays reachable.
 router.get("/faqs", supportController.getFAQs);
+// Guided support conversation (topics → issues → answers). Public like FAQs.
+router.get("/flow", supportController.getSupportFlow);
 
 // ── AUTHENTICATED (customer) ──
 router.use(verifyUserToken);

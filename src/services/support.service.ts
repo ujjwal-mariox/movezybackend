@@ -85,6 +85,7 @@ export const createTicket = async (data: {
   type?: SupportTicketType;
   category: string;
   subcategory?: string;
+  supportPath?: string[];
   subject: string;
   description: string;
   priority?: ISupportTicket["priority"];

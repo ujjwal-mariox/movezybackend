@@ -566,6 +566,13 @@ driverRouter.post(
   ResponseMiddleware,
 );
 
+// Guided support conversation (topics → issues → answers)
+driverRouter.get(
+  "/support/flow",
+  ErrorHandlerMiddleware(DriverController.getSupportFlow),
+  ResponseMiddleware,
+);
+
 // Raise support ticket
 driverRouter.post(
   "/support/ticket",

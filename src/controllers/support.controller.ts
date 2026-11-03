@@ -4,6 +4,7 @@ import { SupportTicket, SupportMessage } from "../models/support-ticket.model";
 import { FAQ } from "../models/content.model";
 import { cache } from "../utils/redis.util";
 import * as SupportService from "../services/support.service";
+import * as SupportFlow from "../services/support-flow.service";
 
 /**
  * Create a support ticket
@@ -11,7 +12,13 @@ import * as SupportService from "../services/support.service";
 export const createTicket = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user._id;
-    const { category, subject, message, bookingId, priority } = req.body;
+    const { message, bookingId, supportNodeId } = req.body;
+    // An issue picked in the guided chat sets the category, subject, priority
+    // and path, so the agent sees what was already covered.
+    const flow = SupportFlow.ticketFieldsFor("USER", supportNodeId);
+    const category = flow?.category || req.body.category;
+    const subject = req.body.subject || (flow ? `Chat support — ${flow.pathLabel}` : undefined);
+    const priority = req.body.priority || flow?.priority;
 
     if (!category || !subject || !message) {
       return res.status(400).json({
@@ -27,6 +34,8 @@ export const createTicket = async (req: Request, res: Response) => {
       userId,
       bookingId: bookingId ? new Types.ObjectId(bookingId) : undefined,
       category,
+      subcategory: flow?.subcategory,
+      supportPath: flow?.supportPath,
       subject,
       description: message,
       priority,
@@ -145,6 +154,12 @@ export const getTicketById = async (req: Request, res: Response) => {
       data: {
         ticket,
         messages,
+        // Chips for the customer's reply after an agent message.
+        followUps: SupportFlow.followUpsFor(
+          "USER",
+          (ticket as any).supportPath,
+          String(req.query.lang || "en"),
+        ),
       },
     });
   } catch (error: any) {
@@ -358,4 +373,15 @@ export const getHelpTopics = async (req: Request, res: Response) => {
       message: error.message || "Failed to fetch topics",
     });
   }
+};
+
+/**
+ * The guided support conversation for the customer app (topic → issue →
+ * answer), in ?lang= (falls back to English).
+ */
+export const getSupportFlow = async (req: Request, res: Response) => {
+  res.json({
+    success: true,
+    data: SupportFlow.getFlow("USER", String(req.query.lang || "en")),
+  });
 };

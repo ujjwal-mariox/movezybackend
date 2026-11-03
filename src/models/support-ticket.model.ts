@@ -13,6 +13,8 @@ export interface ISupportTicket {
   type: SupportTicketType;
   category: string;
   subcategory?: string;
+  /** Guided-support path (config/support-flows ids, topic → issue). */
+  supportPath?: string[];
   subject: string;
   description: string;
   priority: "LOW" | "MEDIUM" | "HIGH" | "URGENT";
@@ -103,6 +105,10 @@ const SupportTicketSchema = new Schema<ISupportTicket>(
       index: true,
     },
     subcategory: String,
+    // Guided-support path the customer/driver tapped through before
+    // escalating; drives the agent's suggested replies and the user's
+    // follow-up chips.
+    supportPath: { type: [String], default: undefined },
     subject: {
       type: String,
       required: true,

@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import * as SupportService from "../../services/support.service";
+import * as SupportFlow from "../../services/support-flow.service";
 import { Types } from "mongoose";
 import { emitToUser } from "../../utils/socket.util";
 
@@ -66,7 +67,15 @@ export const getTicket = async (req: Request, res: Response) => {
     channel as any,
   );
 
-  res.locals.data = { ticket, messages };
+  // Ready replies for the issue the customer/driver picked in the guided
+  // chat (most specific first); the generic quick replies still follow.
+  const isDriver = !!(ticket as any).driverId && !(ticket as any).userId;
+  const flowSuggestions = SupportFlow.agentRepliesFor(
+    isDriver ? "DRIVER" : "USER",
+    (ticket as any).supportPath,
+  );
+
+  res.locals.data = { ticket, messages, flowSuggestions };
 };
 
 /**
