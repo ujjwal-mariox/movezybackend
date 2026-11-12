@@ -13,6 +13,7 @@ import * as NotificationService from "./notification.service";
 import * as SmsService from "./sms.service";
 import socketUtils from "../utils/socket.util";
 import { cache } from "../utils/redis.util";
+import { notifyAdmins } from "./admin-alert.service";
 
 const MAX_EMERGENCY_CONTACTS = 5;
 
@@ -179,6 +180,14 @@ export const triggerSOS = async (
       timestamp: new Date(),
     });
   }
+  void notifyAdmins({
+    section: "sos",
+    type: "SOS",
+    severity: "critical",
+    title: `SOS raised by ${triggeredBy === "DRIVER" ? "partner" : "customer"}`,
+    message: address || `${location.lat}, ${location.lng}`,
+    entityId: String(sosAlert._id),
+  });
 
   // A driver's SOS also tells the customer help is on the way. A customer's
   // SOS deliberately does NOT notify the driver (decision 2026-10-26): if the

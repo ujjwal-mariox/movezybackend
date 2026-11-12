@@ -35,6 +35,7 @@ import * as EnhancedFinanceController from "../controllers/admin/enhanced-financ
 import * as EnhancedDriverController from "../controllers/admin/enhanced-driver.controller";
 import * as EnterpriseCreditController from "../controllers/admin/enterprise-credit.controller";
 import * as SessionController from "../controllers/admin/session.controller";
+import * as AdminAlertController from "../controllers/admin/admin-alert.controller";
 import AdminAuthMiddleware from "../middlewares/admin-auth.middleware";
 import ErrorHandlerMiddleware from "../middlewares/error-handler.middleware";
 import ResponseMiddleware from "../middlewares/response.middleware";
@@ -47,6 +48,12 @@ import { PERMISSIONS } from "../models/role.model";
 
 const adminRouter = Router();
 const { verifyAdminToken, requirePermission } = AdminAuthMiddleware();
+
+// Alert feed for the bell and sidebar counts. No extra permission: each
+// query is limited to the sections the admin's role can open.
+adminRouter.get("/alerts", verifyAdminToken, ErrorHandlerMiddleware(AdminAlertController.listAlerts), ResponseMiddleware);
+adminRouter.get("/alerts/counts", verifyAdminToken, ErrorHandlerMiddleware(AdminAlertController.alertCounts), ResponseMiddleware);
+adminRouter.put("/alerts/read", verifyAdminToken, ErrorHandlerMiddleware(AdminAlertController.markAlertsRead), ResponseMiddleware);
 
 adminRouter.get("/contact-messages", verifyAdminToken, requirePermission(PERMISSIONS.SUPPORT_VIEW), ErrorHandlerMiddleware(ContactMessageController.listContactMessages), ResponseMiddleware);
 adminRouter.put("/contact-messages/:id/status", verifyAdminToken, requirePermission(PERMISSIONS.SUPPORT_RESOLVE), ErrorHandlerMiddleware(ContactMessageController.updateContactMessageStatus), ResponseMiddleware);

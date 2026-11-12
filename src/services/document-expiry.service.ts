@@ -5,6 +5,7 @@ import DriverKYC from "../models/driver-kyc.model";
 import { cache } from "../utils/redis.util";
 import * as NotificationService from "./notification.service";
 import { syncDriverDispatchRows } from "./vehicle-lifecycle.service";
+import { notifyAdmins } from "./admin-alert.service";
 
 /**
  * Document expiry — how it is tracked, cached and enforced.
@@ -337,6 +338,26 @@ export const runDocumentExpiryJob = async (): Promise<{
         );
       }
     }
+  }
+
+  const paused = out.vehiclesBlocked + out.driversBlocked;
+  const reminders = out.vehicleReminders + out.licenceReminders;
+  if (paused > 0) {
+    await notifyAdmins({
+      section: "compliance",
+      type: "DOCS_EXPIRED",
+      severity: "warning",
+      title: `${paused} paused for expired documents`,
+      message: `${out.driversBlocked} partner licence(s), ${out.vehiclesBlocked} vehicle(s)`,
+    });
+  }
+  if (reminders > 0) {
+    await notifyAdmins({
+      section: "compliance",
+      type: "DOCS_EXPIRING",
+      title: `${reminders} document(s) expiring soon`,
+      message: "Partners were reminded to upload renewals",
+    });
   }
 
   await cache.del(SUMMARY_CACHE_KEY);

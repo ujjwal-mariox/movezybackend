@@ -45,6 +45,8 @@ export interface ILocation {
   /** Pickup city, when the app captured it (drives city-specific rates). */
   city?: string;
   state?: string;
+  /** House / apartment / shop line typed under the map pick. */
+  addressLine?: string;
   contactName?: string;
   contactPhone?: string;
   floor?: number;

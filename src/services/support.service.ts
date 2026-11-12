@@ -9,6 +9,7 @@ import {
   SupportChannel,
 } from "../models/support-ticket.model";
 import { Types } from "mongoose";
+import { notifyAdmins } from "./admin-alert.service";
 
 const PRIORITY_SLA_MINUTES: Record<string, number> = {
   URGENT: 30,
@@ -125,6 +126,15 @@ export const createTicket = async (data: {
     slaDueAt,
     repeatCount,
     status: "OPEN",
+  });
+
+  void notifyAdmins({
+    section: "support",
+    type: "TICKET_NEW",
+    severity: priority === "URGENT" || priority === "HIGH" ? "warning" : "info",
+    title: `New ticket ${ticketId}: ${data.subject}`,
+    message: `${data.driverId ? "Partner" : "Customer"} · ${data.category} · ${priority}`,
+    entityId: String(ticket._id),
   });
 
   return ticket;
@@ -402,7 +412,18 @@ export const addMessage = async (data: {
     }
   }
 
-  await SupportTicket.findByIdAndUpdate(data.ticketId, ticketUpdate);
+  const ticketDoc = await SupportTicket.findByIdAndUpdate(data.ticketId, ticketUpdate);
+
+  if (data.senderType === "USER" || data.senderType === "DRIVER") {
+    void notifyAdmins({
+      section: "support",
+      type: "TICKET_REPLY",
+      title: `New reply on ticket ${ticketDoc?.ticketId || ""}`.trim(),
+      message: `${data.senderType === "DRIVER" ? "Partner" : "Customer"}: ${String(data.message || "").slice(0, 120)}`,
+      entityId: String(data.ticketId),
+      foldMinutes: 120,
+    });
+  }
 
   return message;
 };

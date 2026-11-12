@@ -47,6 +47,7 @@ import {
 } from "../services/document-expiry.service";
 import { presentPhone } from "../services/call-masking.service";
 import { computeBookingTax } from "../services/tax.service";
+import { notifyAdmins, partnerName, rupees } from "../services/admin-alert.service";
 
 const DEFAULT_JOINING_FEE = 999;
 
@@ -1204,6 +1205,13 @@ export const withdrawFromWallet = async (
       },
       requestedBy: new Types.ObjectId(driverId),
       requestedByType: "Driver",
+    });
+    void notifyAdmins({
+      section: "payouts",
+      type: "PAYOUT_REQUEST",
+      title: `Payout request ${rupees(amount)}`,
+      message: `${(driver as any).fullName || (driver as any).mobileNumber || "Partner"} · ${method}`,
+      entityId: String(payout._id),
     });
 
     req.rData = {
@@ -2887,6 +2895,7 @@ function mapDashboardBooking(booking: any, commissionPercent = 20) {
       address: booking?.pickup?.address || "",
       lat: Number(booking?.pickup?.lat || 0),
       lng: Number(booking?.pickup?.lng || 0),
+      addressLine: booking?.pickup?.addressLine || "",
       contactName: booking?.pickup?.contactName || "",
       contactPhone: presentPhone(booking?.pickup?.contactPhone),
       floor: booking?.pickup?.floor ?? null,
@@ -2896,6 +2905,7 @@ function mapDashboardBooking(booking: any, commissionPercent = 20) {
       address: booking?.drop?.address || "",
       lat: Number(booking?.drop?.lat || 0),
       lng: Number(booking?.drop?.lng || 0),
+      addressLine: booking?.drop?.addressLine || "",
       contactName: booking?.drop?.contactName || "",
       contactPhone: presentPhone(booking?.drop?.contactPhone),
       floor: booking?.drop?.floor ?? null,
@@ -3824,6 +3834,15 @@ export const payOnboardingFee = async (
       });
 
       await recordCouponUsage(unpaid, driverId);
+      void notifyAdmins({
+        section: "riders",
+        type: "PARTNER_VERIFY",
+        severity: "warning",
+        title: alreadyOnboardedW ? "New vehicle waiting for verification" : "Partner waiting for verification",
+        message: `${await partnerName(driverId)} · fee waived by coupon`,
+        entityId: String(driverId),
+        foldMinutes: 24 * 60,
+      });
 
       req.rData = {
         waived: true,
@@ -3970,6 +3989,15 @@ export const verifyOnboardingPayment = async (
       onboardingFeePaid: true,
       onboardingPaymentId: paymentId,
       ...(alreadyOnboarded ? {} : { status: "under_verification" }),
+    });
+    void notifyAdmins({
+      section: "riders",
+      type: "PARTNER_VERIFY",
+      severity: "warning",
+      title: alreadyOnboarded ? "New vehicle waiting for verification" : "Partner waiting for verification",
+      message: `${await partnerName(driverId)} · onboarding fee paid`,
+      entityId: String(driverId),
+      foldMinutes: 24 * 60,
     });
 
     req.rData = {

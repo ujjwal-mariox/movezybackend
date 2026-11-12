@@ -20,6 +20,7 @@ import {
   getTrainingGateStatus,
   hasMandatoryTraining,
 } from "./training-gate.service";
+import { notifyAdmins, shortAddress } from "./admin-alert.service";
 
 // Redis keys
 const BOOKING_DRIVERS_KEY = "booking:drivers:"; // booking:drivers:{bookingId} -> Set of driver IDs
@@ -460,6 +461,15 @@ const noDriversAvailable = async (bookingId: string, booking: any): Promise<void
     EX: 5 * 60,
   });
   if (first === null) return;
+  void notifyAdmins({
+    section: "orders",
+    type: "NO_DRIVER",
+    severity: "warning",
+    title: `No partner found for ${booking.bookingNumber || "a booking"}`,
+    message: `${booking.vehicleTypeId?.name || "Vehicle"} · from ${shortAddress(booking.pickup?.address)}`,
+    entityId: String(bookingId),
+    foldMinutes: 60,
+  });
   const userId = booking.userId?._id?.toString() || booking.userId?.toString();
   if (userId) {
     emitToUser(userId, "booking:no_drivers", {

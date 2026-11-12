@@ -4,6 +4,7 @@ import { AppConfig } from "../models/app-config.model";
 import { isEmailConfigured, sendEmail } from "../services/email.service";
 import config from "../config";
 import { CONTACT_CATEGORIES, contactCategory } from "../services/contact-category.service";
+import { notifyAdmins } from "../services/admin-alert.service";
 
 /**
  * POST /contact — the website's contact form.
@@ -72,6 +73,14 @@ export const submitContact = async (req: Request, res: Response) => {
     source: String(body.source || "website").slice(0, 40),
     ip: (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip,
     userAgent: String(req.headers["user-agent"] || "").slice(0, 300),
+  });
+
+  void notifyAdmins({
+    section: "website-enquiries",
+    type: "CONTACT_MESSAGE",
+    title: `Website enquiry: ${subject}`,
+    message: `${name} · ${category}`,
+    entityId: String(row._id),
   });
 
   // Confirm durable storage before waiting for SMTP. A slow mail server must

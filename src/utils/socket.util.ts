@@ -165,6 +165,16 @@ export const initSocket = async (httpServer: HttpServer): Promise<Server> => {
       // Admins listen for platform-wide alerts (sos:new is emitted to "admin").
       if (socket.userType === "ADMIN") {
         socket.join("admin");
+        // Plus one room per alert section the admin's role can open, so a
+        // panel only receives the alerts its role is allowed to see.
+        (async () => {
+          try {
+            const { sectionsForAdminId, sectionRoom } = await import("../services/admin-alert.service");
+            for (const s of await sectionsForAdminId(socket.userId!)) socket.join(sectionRoom(s));
+          } catch (e: any) {
+            console.error("admin alert rooms failed:", e?.message);
+          }
+        })();
       }
 
       if (socket.userType === "DRIVER") {

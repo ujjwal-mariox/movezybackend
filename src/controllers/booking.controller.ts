@@ -39,6 +39,7 @@ const maskDriver = <T,>(b: T): T => {
   return b;
 };
 import { Types } from "mongoose";
+import * as AdminAlerts from "../services/admin-alert.service";
 
 /** Recheck at quote/booking time in case locations or the catalogue changed. */
 const rejectIneligibleBookingVehicle = async (res: Response, vehicleTypeId: string, distanceKm: number, serviceType?: string) => {
@@ -357,7 +358,13 @@ export const createBooking = async (req: Request, res: Response) => {
       receiverPhone,
       senderName,
       senderPhone,
+      pickupAddressLine,
+      dropAddressLine,
     } = req.body;
+
+    // House / apartment / shop lines from the sender and receiver screens.
+    const line = (v: unknown) =>
+      typeof v === "string" && v.trim() ? { addressLine: v.trim().slice(0, 120) } : {};
 
     // Sender details (client feedback, 2026-10-26): sent only when someone
     // other than the customer hands over the goods; they become the pickup
@@ -692,11 +699,13 @@ export const createBooking = async (req: Request, res: Response) => {
         ...(bookingCity ? { city: bookingCity } : {}),
         ...(pickupState || pickupLocation?.state ? { state: pickupState || pickupLocation?.state } : {}),
         ...pickupContact,
+        ...line(pickupAddressLine),
       },
       drop: {
         address: safeDropAddress,
         lat: dropLocation.lat,
         lng: dropLocation.lng,
+        ...line(dropAddressLine),
       },
       stops: (stops || []).map((stop: any) => ({
         address: stop.address || "Stop",
@@ -810,6 +819,14 @@ export const createBooking = async (req: Request, res: Response) => {
         dispatchResult,
       );
     }
+
+    void AdminAlerts.notifyAdmins({
+      section: "orders",
+      type: "BOOKING_NEW",
+      title: `New booking ${booking.bookingNumber}`,
+      message: `${AdminAlerts.rupees(booking.finalFare)} · ${scheduledDate ? "scheduled" : "pickup now"} · from ${AdminAlerts.shortAddress(booking.pickup?.address)}`,
+      entityId: String(booking._id),
+    });
 
     res.status(201).json({
       success: true,
@@ -1455,6 +1472,14 @@ export const cancelScheduledBooking = async (req: Request, res: Response) => {
     booking.cancelledBy = "USER";
     await booking.save();
 
+    void AdminAlerts.notifyAdmins({
+      section: "orders",
+      type: "BOOKING_CANCELLED",
+      title: `Booking ${booking.bookingNumber} cancelled by customer`,
+      message: "Scheduled booking",
+      entityId: String(booking._id),
+    });
+
     await PromoService.releasePromoForBooking(booking._id as Types.ObjectId).catch(
       (e) => console.error("Failed to release coupon on cancellation:", e),
     );
@@ -1676,6 +1701,14 @@ export const cancelBooking = async (req: Request, res: Response) => {
     booking.cancelledBy = "USER";
     await booking.save();
 
+    void AdminAlerts.notifyAdmins({
+      section: "orders",
+      type: "BOOKING_CANCELLED",
+      title: `Booking ${booking.bookingNumber} cancelled by customer`,
+      message: booking.cancellationReason || (assignedDriverId ? "After a partner was assigned" : ""),
+      entityId: String(booking._id),
+    });
+
     // 1. Refund the paid amount (if any), pro-rated by the reason's refund %.
     let refundResult: { success: boolean; message: string } = {
       success: false,
@@ -1712,6 +1745,17 @@ export const cancelBooking = async (req: Request, res: Response) => {
         ? "PENDING"
         : booking.refundStatus;
     await booking.save();
+
+    if (wasPaid && netRefund > 0 && !refundResult.success) {
+      void AdminAlerts.notifyAdmins({
+        section: "orders",
+        type: "REFUND_FAILED",
+        severity: "warning",
+        title: `Refund failed for ${booking.bookingNumber}`,
+        message: `${AdminAlerts.rupees(netRefund)} to refund · ${refundResult.message || "gateway error"}`,
+        entityId: String(booking._id),
+      });
+    }
 
     // 1b. Give an enterprise back the same slice a cash customer would have
     // refunded. A credit booking consumed Enterprise.usedCredit when it was

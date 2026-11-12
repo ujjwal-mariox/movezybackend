@@ -4,6 +4,7 @@ import * as EnterpriseService from "../services/enterprise.service";
 import { EnterpriseInquiry } from "../models/enterprise-inquiry.model";
 import { EnterpriseContent } from "../models/enterprise-content.model";
 import User from "../models/Users";
+import * as AdminAlerts from "../services/admin-alert.service";
 
 /**
  * Get enterprise page content (public)
@@ -139,6 +140,14 @@ export const submitEnterpriseInquiry = async (req: Request, res: Response) => {
       message: trimmed(message),
       source: source || "GET_IN_TOUCH",
       status: "NEW",
+    });
+
+    void AdminAlerts.notifyAdmins({
+      section: "enterprises",
+      type: "ENTERPRISE_INQUIRY",
+      title: `Enterprise enquiry: ${inquiry.companyName}`,
+      message: `${inquiry.name}${inquiry.phone ? ` · ${inquiry.phone}` : ""}`,
+      entityId: String(inquiry._id),
     });
 
     res.status(201).json({
@@ -487,6 +496,14 @@ export const createCreditBooking = async (req: Request, res: Response) => {
       userId,
       req.body,
     );
+
+    void AdminAlerts.notifyAdmins({
+      section: "orders",
+      type: "BOOKING_NEW",
+      title: `New booking ${(booking as any).bookingNumber} (enterprise credit)`,
+      message: `${AdminAlerts.rupees((booking as any).finalFare)} · ${(userEnterprise.enterprise as any)?.companyName || "Enterprise"}`,
+      entityId: String((booking as any)._id),
+    });
 
     res.status(201).json({
       success: true,

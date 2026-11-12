@@ -25,6 +25,7 @@ import helpers from "../utils/helpers";
 import redis from "../utils/redis";
 import config from "../config";
 import fileUploadService from "../utils/s3";
+import { notifyAdmins, partnerName } from "../services/admin-alert.service";
 
 /**
  * Driver Login - Step 1
@@ -208,6 +209,13 @@ export const verifyDriverOtp = async (
       city: "",
       state: "",
     });
+    void notifyAdmins({
+      section: "riders",
+      type: "PARTNER_SIGNUP",
+      title: "New partner sign-up",
+      message: `${countryCode || "+91"} ${mobileNumber} started onboarding`,
+      entityId: String(driver._id),
+    });
   }
 
   // Signing in again within the grace period keeps the account.
@@ -279,6 +287,14 @@ export const uploadKycDocuments = async (
 
   if (isComplete) {
     await DriverService.updateDriverStatus(driverId, "documents_uploaded");
+    void notifyAdmins({
+      section: "riders",
+      type: "PARTNER_DOCUMENTS",
+      title: "Partner documents uploaded",
+      message: await partnerName(driverId),
+      entityId: String(driverId),
+      foldMinutes: 24 * 60,
+    });
   }
 
   req.rData = { kyc, isComplete };
@@ -954,6 +970,15 @@ export const submitForVerification = async (
 
   // Update status to under_verification
   await DriverService.updateDriverStatus(driverId, "under_verification");
+  void notifyAdmins({
+    section: "riders",
+    type: "PARTNER_VERIFY",
+    severity: "warning",
+    title: "Partner waiting for verification",
+    message: driver?.fullName || (await partnerName(driverId)),
+    entityId: String(driverId),
+    foldMinutes: 24 * 60,
+  });
 
   req.rData = { status: "under_verification" };
   req.msg = "submitted_for_verification";

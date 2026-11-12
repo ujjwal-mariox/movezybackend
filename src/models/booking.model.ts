@@ -14,6 +14,9 @@ const LocationSchema = new Schema(
     city: String,
     // State of the address — the GST place of supply for the pickup.
     state: String,
+    // House / apartment / shop line the customer types under the map pick
+    // (client feedback, 2026-11-12); shown to the driver with the address.
+    addressLine: String,
     contactName: String,
     contactPhone: String,
     floor: Number,
