@@ -34,6 +34,7 @@ import { Notification } from "../models/notification.model";
 import * as IncentiveService from "../services/incentive.service";
 import * as SOSService from "../services/sos.service";
 import { AppConfig, FareConfig } from "../models/app-config.model";
+import { buildReferralShare } from "../services/referral-message.service";
 import { cache } from "../utils/redis.util";
 import Payout from "../models/payout.model";
 import * as DriverPayoutService from "../services/driver-payout.service";
@@ -4562,8 +4563,16 @@ export const getDriverReferralStats = async (
       .limit(20)
       .lean();
 
+    // Share text and invite link from Admin → Settings → Referral share messages.
+    const { referralLink, shareMessage } = await buildReferralShare(
+      "driver",
+      driver!.referralCode || "",
+    );
+
     req.rData = {
       referralCode: driver!.referralCode,
+      referralLink,
+      shareMessage,
       referralCount,
       totalEarnings,
       referrerRewardAmount: REFERRER_REWARD_AMOUNT,
